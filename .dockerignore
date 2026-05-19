@@ -1,0 +1,8 @@
+# Keeps Docker build contexts small and free of local secrets.
+
+.git
+.env
+.venv
+__pycache__/
+*.pyc
+qdrant_data/

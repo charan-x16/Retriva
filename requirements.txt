@@ -1,0 +1,17 @@
+# Python dependencies for Retriva Stage 1.
+
+fastapi
+uvicorn
+pymupdf
+pytesseract
+camelot-py
+sentence-transformers
+FlagEmbedding
+rank-bm25
+qdrant-client
+openai
+streamlit
+python-multipart
+python-dotenv
+Pillow
+requests
