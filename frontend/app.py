@@ -88,6 +88,22 @@ def render_chunks(chunks):
                 st.write(chunk.get("text", ""))
 
 
+def render_correction_info(message):
+    """Render CRAG correction metadata for an assistant response."""
+
+    grade_score = message.get("grade_score")
+    if grade_score is not None:
+        st.caption(f"Context grade: {grade_score:.2f}")
+
+    if message.get("was_corrected"):
+        original_query = message.get("original_query", "")
+        query_used = message.get("query_used", "")
+        st.info(
+            "Query was rewritten for better retrieval. "
+            f"Original: {original_query} | Rewritten: {query_used}"
+        )
+
+
 def render_message(message):
     """Render one chat message with optional citations and chunks."""
 
@@ -97,6 +113,7 @@ def render_message(message):
             timestamp = message.get("timestamp")
             if timestamp:
                 st.caption(timestamp)
+            render_correction_info(message)
             render_sources(message.get("citations", []))
             if st.session_state.show_chunks:
                 render_chunks(message.get("chunks", []))
@@ -132,10 +149,15 @@ def handle_query(prompt):
                     "content": content,
                     "citations": result.get("citations", []),
                     "chunks": result.get("chunks", []),
+                    "was_corrected": result.get("was_corrected", False),
+                    "grade_score": result.get("grade_score"),
+                    "original_query": result.get("original_query", prompt),
+                    "query_used": result.get("query_used", prompt),
                     "timestamp": datetime.now().strftime("%I:%M %p"),
                 }
                 st.markdown(content)
                 st.caption(assistant_message["timestamp"])
+                render_correction_info(assistant_message)
                 render_sources(assistant_message["citations"])
                 if st.session_state.show_chunks:
                     render_chunks(assistant_message["chunks"])

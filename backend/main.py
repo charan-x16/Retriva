@@ -7,19 +7,18 @@ from dotenv import load_dotenv
 from fastapi import FastAPI, File, HTTPException, UploadFile
 from pydantic import BaseModel
 
+from backend.correction.pipeline import self_correcting_retrieve
 from backend.db.qdrant_client import init_qdrant, upsert_chunks
 from backend.generation.answer_gen import generate_answer
 from backend.generation.llm_provider import get_llm_provider
 from backend.ingestion.chunker import chunk_documents
 from backend.ingestion.parsers import detect_and_parse
-from backend.reranker.bge_reranker import load_reranker, rerank
-from backend.retrieval.bm25_retriever import embed_sparse_texts, retrieve_bm25
+from backend.reranker.bge_reranker import load_reranker
+from backend.retrieval.bm25_retriever import embed_sparse_texts
 from backend.retrieval.dense_retriever import (
     embed_texts,
     load_embedding_model,
-    retrieve_dense,
 )
-from backend.retrieval.fusion import reciprocal_rank_fusion
 
 load_dotenv()
 
@@ -140,24 +139,40 @@ def query_docs(request: QueryRequest):
             ),
             "citations": [],
             "chunks": [],
+            "was_corrected": False,
+            "grade_score": None,
+            "original_query": question,
+            "query_used": question,
         }
 
     client = get_qdrant_client()
     model = get_embedding_model()
+    llm = get_llm()
 
-    bm25_results = retrieve_bm25(client, question, top_k=20)
-    dense_results = retrieve_dense(client, model, question, top_k=20)
-    fused_chunks = reciprocal_rank_fusion([bm25_results, dense_results])
-    if not fused_chunks:
+    retrieval_result = self_correcting_retrieve(
+        llm=llm,
+        bm25_index=None,
+        bm25_chunks=None,
+        qdrant_client=client,
+        embed_model=model,
+        reranker=get_bge_reranker(),
+        query=question,
+        top_k=5,
+    )
+    top_chunks = retrieval_result["chunks"]
+    if not top_chunks:
         raise HTTPException(status_code=404, detail="No indexed chunks found.")
 
-    top_chunks = rerank(get_bge_reranker(), question, fused_chunks, top_k=5)
-    answer_payload = generate_answer(get_llm(), question, top_chunks)
+    answer_payload = generate_answer(llm, question, top_chunks)
 
     return {
         "answer": answer_payload["answer"],
         "citations": answer_payload["citations"],
         "chunks": top_chunks,
+        "was_corrected": retrieval_result["was_corrected"],
+        "grade_score": retrieval_result["grade_score"],
+        "original_query": question,
+        "query_used": retrieval_result["query_used"],
     }
 
 
