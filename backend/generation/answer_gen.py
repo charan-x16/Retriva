@@ -1,6 +1,8 @@
-"""Prompt construction and citation parsing for grounded answers."""
+"""Answer generation and citation parsing for grounded responses."""
 
 import re
+
+from backend.generation.prompt import build_answer_prompt
 
 SOURCE_RE = re.compile(r"\[Source:\s*page\s+(\d+),\s*([^\]]+)\]")
 
@@ -8,29 +10,10 @@ SOURCE_RE = re.compile(r"\[Source:\s*page\s+(\d+),\s*([^\]]+)\]")
 def generate_answer(llm, query, chunks) -> dict:
     """Generate an answer from chunks and extract inline source citations."""
 
-    context = _format_context(chunks)
-    prompt = (
-        "Answer the question using only the provided context.\n"
-        "For each fact, add [Source: page X, <source filename>] inline.\n\n"
-        f"Context:\n{context}\n\n"
-        f"Question: {query}"
-    )
-
+    prompt = build_answer_prompt(query, chunks)
     answer = llm.generate(prompt)
     citations = _extract_citations(answer)
     return {"answer": answer, "citations": citations}
-
-
-def _format_context(chunks) -> str:
-    """Format retrieved chunks for the LLM prompt."""
-
-    lines = []
-    for index, chunk in enumerate(chunks, start=1):
-        lines.append(
-            f"{index}. Page {chunk.get('page')}, {chunk.get('source')}\n"
-            f"{chunk.get('text', '')}"
-        )
-    return "\n\n".join(lines)
 
 
 def _extract_citations(answer) -> list[dict]:
@@ -47,4 +30,3 @@ def _extract_citations(answer) -> list[dict]:
         seen.add(key)
         citations.append({"page": page, "source": source})
     return citations
-

@@ -13,7 +13,7 @@ from backend.generation.llm_provider import get_llm_provider
 from backend.ingestion.chunker import chunk_documents
 from backend.ingestion.parsers import detect_and_parse
 from backend.reranker.bge_reranker import load_reranker, rerank
-from backend.retrieval.bm25_retriever import build_bm25_index, retrieve_bm25
+from backend.retrieval.bm25_retriever import embed_sparse_texts, retrieve_bm25
 from backend.retrieval.dense_retriever import (
     embed_texts,
     load_embedding_model,
@@ -29,11 +29,21 @@ _qdrant_client = None
 _embedding_model = None
 _reranker = None
 _llm = None
-_indexed_chunks_by_id = {}
+
+GREETING_WORDS = {
+    "hello",
+    "hi",
+    "hey",
+    "yo",
+    "namaste",
+    "good morning",
+    "good afternoon",
+    "good evening",
+}
 
 
 class QueryRequest(BaseModel):
-    """Request body for question answering."""
+    """Request body for document question answering."""
 
     question: str
 
@@ -48,7 +58,7 @@ def get_qdrant_client():
 
 
 def get_embedding_model():
-    """Return a cached BGE embedding model."""
+    """Return a cached embedding model."""
 
     global _embedding_model
     if _embedding_model is None:
@@ -76,9 +86,7 @@ def get_llm():
 
 @app.post("/ingest")
 async def ingest_pdf(file: UploadFile = File(...)):
-    """Ingest one PDF, index chunks in Qdrant, and refresh the BM25 index."""
-
-    global _indexed_chunks_by_id
+    """Ingest one PDF and index dense plus sparse vectors in Qdrant."""
 
     filename = Path(file.filename or "upload.pdf").name
     if not filename.lower().endswith(".pdf"):
@@ -94,18 +102,20 @@ async def ingest_pdf(file: UploadFile = File(...)):
             raise HTTPException(status_code=400, detail="No text could be extracted.")
 
         model = get_embedding_model()
-        embeddings = embed_texts(model, [chunk["text"] for chunk in chunks])
+        chunk_texts = [chunk["text"] for chunk in chunks]
+        embeddings = embed_texts(model, chunk_texts)
+        sparse_embeddings = embed_sparse_texts(chunk_texts)
         chunks_with_embeddings = [
-            {**chunk, "embedding": embedding}
-            for chunk, embedding in zip(chunks, embeddings)
+            {**chunk, "embedding": embedding, "sparse_embedding": sparse_embedding}
+            for chunk, embedding, sparse_embedding in zip(
+                chunks,
+                embeddings,
+                sparse_embeddings,
+            )
         ]
 
         client = get_qdrant_client()
         upsert_chunks(client, chunks_with_embeddings)
-
-        for chunk in chunks:
-            _indexed_chunks_by_id[chunk["chunk_id"]] = chunk
-        build_bm25_index(list(_indexed_chunks_by_id.values()))
 
     return {
         "status": "ok",
@@ -123,10 +133,19 @@ def query_docs(request: QueryRequest):
     if not question:
         raise HTTPException(status_code=400, detail="Question is required.")
 
+    if _is_greeting(question):
+        return {
+            "answer": (
+                "Hello. Upload and ingest a PDF, then ask me anything about it."
+            ),
+            "citations": [],
+            "chunks": [],
+        }
+
     client = get_qdrant_client()
     model = get_embedding_model()
 
-    bm25_results = retrieve_bm25(question, top_k=20)
+    bm25_results = retrieve_bm25(client, question, top_k=20)
     dense_results = retrieve_dense(client, model, question, top_k=20)
     fused_chunks = reciprocal_rank_fusion([bm25_results, dense_results])
     if not fused_chunks:
@@ -140,3 +159,10 @@ def query_docs(request: QueryRequest):
         "citations": answer_payload["citations"],
         "chunks": top_chunks,
     }
+
+
+def _is_greeting(text: str) -> bool:
+    """Return whether the user message is a simple greeting."""
+
+    normalized = text.lower().strip(" .,!?\n\t")
+    return normalized in GREETING_WORDS

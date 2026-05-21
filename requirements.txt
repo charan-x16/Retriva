@@ -7,8 +7,9 @@ pytesseract
 camelot-py
 sentence-transformers
 FlagEmbedding
-rank-bm25
+transformers>=4.44.2,<5
 qdrant-client
+fastembed
 openai
 streamlit
 python-multipart

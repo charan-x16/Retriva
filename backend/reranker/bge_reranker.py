@@ -1,12 +1,19 @@
 """BGE reranker loading and scoring for candidate chunks."""
 
+import os
+
+from dotenv import load_dotenv
 from FlagEmbedding import FlagReranker
 
 
 def load_reranker() -> FlagReranker:
-    """Load the BGE reranker model."""
+    """Load the configured BGE reranker model."""
 
-    return FlagReranker("BAAI/bge-reranker-v2-m3", use_fp16=True)
+    load_dotenv()
+    model_name = os.getenv("RERANKER_MODEL", "BAAI/bge-reranker-v2-m3")
+    cache_dir = os.getenv("MODEL_CACHE_DIR", ".cache/models")
+    use_fp16 = os.getenv("RERANKER_USE_FP16", "true").lower() == "true"
+    return FlagReranker(model_name, use_fp16=use_fp16, cache_dir=cache_dir)
 
 
 def rerank(reranker, query, chunks, top_k=5) -> list[dict]:
@@ -29,4 +36,3 @@ def rerank(reranker, query, chunks, top_k=5) -> list[dict]:
         ranked.append(item)
 
     return sorted(ranked, key=lambda item: item["rerank_score"], reverse=True)[:top_k]
-

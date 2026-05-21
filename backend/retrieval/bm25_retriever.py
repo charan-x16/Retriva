@@ -1,35 +1,42 @@
-"""In-memory BM25 retriever for indexed document chunks."""
+"""Qdrant-backed BM25 retriever for document chunks."""
 
-from rank_bm25 import BM25Okapi
+import os
 
-BM25_INDEX = None
-BM25_CHUNKS = []
+from dotenv import load_dotenv
+from qdrant_client.models import Document
+
+from backend.db.qdrant_client import search_sparse
 
 
 def build_bm25_index(chunks):
-    """Build and cache a BM25 index over chunk text."""
+    """No-op compatibility hook; Qdrant builds the sparse index on upsert."""
 
-    global BM25_INDEX, BM25_CHUNKS
-
-    BM25_CHUNKS = list(chunks)
-    tokenized_chunks = [_tokenize(chunk["text"]) for chunk in BM25_CHUNKS]
-    BM25_INDEX = BM25Okapi(tokenized_chunks) if tokenized_chunks else None
-    return BM25_INDEX, BM25_CHUNKS
+    return None, chunks
 
 
-def retrieve_bm25(query, top_k=20) -> list[tuple[dict, float]]:
-    """Return top BM25 chunks and scores for a query."""
+def embed_sparse_texts(texts: list[str]) -> list[Document]:
+    """Create Qdrant BM25 document vectors for indexing."""
 
-    if BM25_INDEX is None or not BM25_CHUNKS:
+    return [embed_sparse_text(text) for text in texts]
+
+
+def embed_sparse_text(text: str) -> Document:
+    """Create one Qdrant BM25 document vector."""
+
+    return Document(text=text, model=get_bm25_model())
+
+
+def retrieve_bm25(client, query, top_k=20) -> list[dict]:
+    """Return top chunks from Qdrant BM25 search."""
+
+    query_vector = embed_sparse_text(query)
+    if not query.strip():
         return []
-
-    scores = BM25_INDEX.get_scores(_tokenize(query))
-    ranked = sorted(enumerate(scores), key=lambda item: item[1], reverse=True)
-    return [(BM25_CHUNKS[index], float(score)) for index, score in ranked[:top_k]]
+    return search_sparse(client, query_vector, top_k=top_k)
 
 
-def _tokenize(text) -> list[str]:
-    """Tokenize text for BM25 with a simple lowercase split."""
+def get_bm25_model() -> str:
+    """Return the configured Qdrant BM25 model name."""
 
-    return text.lower().split()
-
+    load_dotenv()
+    return os.getenv("BM25_MODEL", "qdrant/bm25")
