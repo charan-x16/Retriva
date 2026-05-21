@@ -6,6 +6,8 @@ from abc import ABC, abstractmethod
 from dotenv import load_dotenv
 from openai import OpenAI
 
+from backend.generation.prompt import SYSTEM_PROMPT
+
 
 class LLMProvider(ABC):
     """Abstract interface for text generation providers."""
@@ -29,10 +31,7 @@ class OpenAIProvider(LLMProvider):
         response = self.client.chat.completions.create(
             model=self.model,
             messages=[
-                {
-                    "role": "system",
-                    "content": "Answer only from the supplied context and keep citations inline.",
-                },
+                {"role": "system", "content": SYSTEM_PROMPT},
                 {"role": "user", "content": prompt},
             ],
             temperature=0,
@@ -67,10 +66,7 @@ class OpenRouterProvider(LLMProvider):
         response = self.client.chat.completions.create(
             model=self.model,
             messages=[
-                {
-                    "role": "system",
-                    "content": "Answer only from the supplied context and keep citations inline.",
-                },
+                {"role": "system", "content": SYSTEM_PROMPT},
                 {"role": "user", "content": prompt},
             ],
             temperature=0,
