@@ -16,3 +16,4 @@ python-multipart
 python-dotenv
 Pillow
 requests
+ragas

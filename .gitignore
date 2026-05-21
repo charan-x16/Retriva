@@ -216,3 +216,12 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Retriva evaluation logs
+eval_log.db
+eval_log.db-journal
+backend/evaluation/*.db
+backend/evaluation/*.db-journal
+plain_write_test.txt
+test_eval*.db
+test_eval*.db-journal

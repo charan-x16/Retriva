@@ -4,11 +4,18 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi import BackgroundTasks, FastAPI, File, HTTPException, UploadFile
 from pydantic import BaseModel
 
 from backend.correction.pipeline import self_correcting_retrieve
 from backend.db.qdrant_client import init_qdrant, upsert_chunks
+from backend.evaluation.logger import (
+    get_all_logs,
+    init_db,
+    log_query,
+    update_ragas_scores,
+)
+from backend.evaluation.ragas_eval import compute_ragas
 from backend.generation.answer_gen import generate_answer
 from backend.generation.llm_provider import get_llm_provider
 from backend.ingestion.chunker import chunk_documents
@@ -23,6 +30,7 @@ from backend.retrieval.dense_retriever import (
 load_dotenv()
 
 app = FastAPI(title="Retriva", version="0.1.0")
+init_db()
 
 _qdrant_client = None
 _embedding_model = None
@@ -39,6 +47,13 @@ GREETING_WORDS = {
     "good afternoon",
     "good evening",
 }
+
+RAGAS_METRICS = [
+    "faithfulness",
+    "answer_relevancy",
+    "context_precision",
+    "context_recall",
+]
 
 
 class QueryRequest(BaseModel):
@@ -125,7 +140,7 @@ async def ingest_pdf(file: UploadFile = File(...)):
 
 
 @app.post("/query")
-def query_docs(request: QueryRequest):
+def query_docs(request: QueryRequest, background_tasks: BackgroundTasks):
     """Answer a question with hybrid retrieval, reranking, and citations."""
 
     question = request.question.strip()
@@ -133,10 +148,10 @@ def query_docs(request: QueryRequest):
         raise HTTPException(status_code=400, detail="Question is required.")
 
     if _is_greeting(question):
+        answer = "Hello. Upload and ingest a PDF, then ask me anything about it."
+        log_query(question, answer, [], None)
         return {
-            "answer": (
-                "Hello. Upload and ingest a PDF, then ask me anything about it."
-            ),
+            "answer": answer,
             "citations": [],
             "chunks": [],
             "was_corrected": False,
@@ -164,6 +179,21 @@ def query_docs(request: QueryRequest):
         raise HTTPException(status_code=404, detail="No indexed chunks found.")
 
     answer_payload = generate_answer(llm, question, top_chunks)
+    contexts = [chunk.get("text", "") for chunk in top_chunks]
+    row_id = log_query(
+        question=question,
+        answer=answer_payload["answer"],
+        contexts=contexts,
+        grade_score=retrieval_result["grade_score"],
+    )
+    background_tasks.add_task(
+        _compute_and_store_ragas,
+        row_id,
+        question,
+        answer_payload["answer"],
+        contexts,
+        model,
+    )
 
     return {
         "answer": answer_payload["answer"],
@@ -176,8 +206,51 @@ def query_docs(request: QueryRequest):
     }
 
 
+@app.get("/eval_logs")
+def eval_logs():
+    """Return all logged query evaluations."""
+
+    return get_all_logs()
+
+
+@app.post("/eval_logs/recompute")
+def recompute_eval_logs(background_tasks: BackgroundTasks):
+    """Re-run Ragas for logged rows that still have pending scores."""
+
+    logs = get_all_logs()
+    pending_logs = [
+        row
+        for row in logs
+        if row.get("contexts")
+        and any(row.get(metric) is None for metric in RAGAS_METRICS)
+    ]
+
+    model = get_embedding_model()
+    for row in pending_logs:
+        background_tasks.add_task(
+            _compute_and_store_ragas,
+            row["id"],
+            row["question"],
+            row["answer"],
+            row["contexts"],
+            model,
+        )
+
+    return {
+        "status": "queued",
+        "rows": len(pending_logs),
+    }
+
+
 def _is_greeting(text: str) -> bool:
     """Return whether the user message is a simple greeting."""
 
     normalized = text.lower().strip(" .,!?\n\t")
     return normalized in GREETING_WORDS
+
+
+def _compute_and_store_ragas(row_id, question, answer, contexts, embed_model) -> None:
+    """Compute Ragas scores in the background and update the log row."""
+
+    scores = compute_ragas(question, answer, contexts, embed_model=embed_model)
+    update_ragas_scores(row_id, scores)

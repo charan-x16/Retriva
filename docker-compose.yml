@@ -33,6 +33,7 @@ services:
       RERANKER_MODEL: ${RERANKER_MODEL:-BAAI/bge-reranker-v2-m3}
       RERANKER_USE_FP16: ${RERANKER_USE_FP16:-true}
       MODEL_CACHE_DIR: ${MODEL_CACHE_DIR:-.cache/models}
+      EVAL_DB_PATH: ${EVAL_DB_PATH:-backend/evaluation/eval_log.db}
       HF_TOKEN: ${HF_TOKEN:-}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       OPENAI_MODEL: ${OPENAI_MODEL:-gpt-4o-mini}
