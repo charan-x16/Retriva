@@ -1,6 +1,7 @@
 """Streamlit chatbot page for uploading PDFs and querying Retriva."""
 
 import os
+import re
 from datetime import datetime
 
 import requests
@@ -10,6 +11,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 BACKEND_URL = os.getenv("BACKEND_URL", "http://localhost:8000").rstrip("/")
+SOURCE_TAG_RE = re.compile(r"\[Source:\s*page\s+(\d+),\s*[^\]]+\]")
 
 
 def init_state():
@@ -22,7 +24,7 @@ def init_state():
 
 
 def ingest_pdf(uploaded_pdf):
-    """Upload a PDF to the backend ingestion endpoint."""
+    """Upload a PDF to the automatic backend ingestion endpoint."""
 
     files = {
         "file": (
@@ -31,9 +33,24 @@ def ingest_pdf(uploaded_pdf):
             "application/pdf",
         )
     }
-    response = requests.post(f"{BACKEND_URL}/ingest", files=files, timeout=900)
+    response = requests.post(f"{BACKEND_URL}/ingest", files=files, timeout=1800)
     response.raise_for_status()
     return response.json()
+
+
+def format_ingest_result(result):
+    """Create a compact ingest success message."""
+
+    messages = []
+    text = result.get("text", {})
+    visual = result.get("visual", {})
+    if text.get("status") == "indexed":
+        messages.append(f"{text['chunks']} OCR chunks")
+    if visual.get("status") == "indexed":
+        messages.append(f"{visual['pages']} visual pages")
+    if messages:
+        return "Indexed " + " and ".join(messages) + "."
+    return "No retrievable content was indexed."
 
 
 def ask_question(question):
@@ -42,10 +59,16 @@ def ask_question(question):
     response = requests.post(
         f"{BACKEND_URL}/query",
         json={"question": question},
-        timeout=900,
+        timeout=1800,
     )
     response.raise_for_status()
     return response.json()
+
+
+def format_answer_for_chat(answer):
+    """Show inline citations as compact page markers in the chat bubble."""
+
+    return SOURCE_TAG_RE.sub(r"[p. \1]", answer or "")
 
 
 def render_sources(citations):
@@ -62,27 +85,95 @@ def render_sources(citations):
     st.markdown("\n".join(lines))
 
 
-def render_chunks(chunks):
-    """Render retrieved chunks inside an expander."""
+def render_chunks(chunks, *, use_expander=True):
+    """Render retrieved text chunks."""
 
     if not chunks:
         return
 
-    with st.expander(f"Retrieved evidence - {len(chunks)} chunks", expanded=False):
-        for index, chunk in enumerate(chunks, start=1):
-            page = chunk.get("page", "?")
-            source = chunk.get("source", "unknown")
-            rrf = chunk.get("rrf_score", 0)
-            rerank_score = chunk.get("rerank_score", 0)
+    if use_expander:
+        with st.expander(f"Text evidence - {len(chunks)} chunks", expanded=False):
+            _render_chunk_items(chunks)
+        return
 
-            with st.container(border=True):
-                st.markdown(f"**#{index}** - Page {page} - `{source}`")
-                st.caption(f"RRF {rrf:.3f} | Rerank {rerank_score:.3f}")
-                st.write(chunk.get("text", ""))
+    st.markdown(f"**Text evidence - {len(chunks)} chunks**")
+    _render_chunk_items(chunks)
+
+
+def _render_chunk_items(chunks):
+    """Render text chunk cards without wrapping layout."""
+
+    for index, chunk in enumerate(chunks, start=1):
+        page = chunk.get("page", "?")
+        source = chunk.get("source", "unknown")
+        rrf = chunk.get("rrf_score", 0)
+        rerank_score = chunk.get("rerank_score", 0)
+
+        with st.container(border=True):
+            st.markdown(f"**#{index}** - Page {page} - `{source}`")
+            st.caption(f"RRF {rrf:.3f} | Rerank {rerank_score:.3f}")
+            st.write(chunk.get("text", ""))
+
+
+def render_visual_results(results):
+    """Render ColPali visual page retrieval results."""
+
+    if not results:
+        st.caption("No ColPali visual pages returned.")
+        return
+
+    for index, result in enumerate(results, start=1):
+        page = result.get("page", "?")
+        source = result.get("source", "unknown")
+        score = result.get("score", 0)
+        with st.container(border=True):
+            st.markdown(f"**Page {page}**")
+            st.caption(f"Rank {index} | Score {score:.3f}")
+            st.write(source)
+
+
+def render_evidence(message, *, use_expanders=True):
+    """Render automatic text and visual evidence."""
+
+    chunks = message.get("chunks", [])
+    visual_results = message.get("visual_results", [])
+    if chunks:
+        render_chunks(chunks, use_expander=use_expanders)
+    if visual_results:
+        if not use_expanders:
+            st.markdown(f"**Visual evidence - {len(visual_results)} pages**")
+            render_visual_results(visual_results)
+            return
+
+        with st.expander(
+            f"Visual evidence - {len(visual_results)} pages",
+            expanded=False,
+        ):
+            render_visual_results(visual_results)
 
 
 def render_correction_info(message):
     """Render CRAG correction metadata for an assistant response."""
+
+    answer_mode = message.get("answer_mode")
+    if answer_mode:
+        labels = {
+            "text_hybrid": "Text retrieval",
+            "visual_multimodal": "Visual retrieval",
+            "text_fallback": "Text fallback",
+            "visual_missing_images": "Visual index needs re-ingestion",
+            "generation_rate_limited": "Generation rate-limited",
+            "generation_error": "Generation failed",
+        }
+        st.caption(f"Answer path: {labels.get(answer_mode, answer_mode)}")
+
+    retrieval_summary = message.get("retrieval_summary") or {}
+    if retrieval_summary:
+        st.caption(
+            "Retrieved "
+            f"{retrieval_summary.get('text_chunks', 0)} text chunks and "
+            f"{retrieval_summary.get('visual_pages', 0)} visual pages."
+        )
 
     grade_score = message.get("grade_score")
     if grade_score is not None:
@@ -97,19 +188,39 @@ def render_correction_info(message):
         )
 
 
+def render_answer_details(message):
+    """Render citations and diagnostics in one collapsed panel."""
+
+    has_sources = bool(message.get("citations"))
+    has_diagnostics = any(
+        message.get(key) is not None
+        for key in ("answer_mode", "retrieval_summary", "grade_score")
+    ) or message.get("was_corrected")
+    has_evidence = bool(message.get("chunks") or message.get("visual_results"))
+
+    if not has_sources and not has_diagnostics and not has_evidence:
+        return
+
+    with st.expander("Answer details", expanded=False):
+        render_sources(message.get("citations", []))
+        render_correction_info(message)
+        if st.session_state.show_chunks:
+            render_evidence(message, use_expanders=False)
+
+
 def render_message(message):
     """Render one chat message with optional citations and chunks."""
 
     with st.chat_message(message["role"]):
-        st.markdown(message["content"])
+        content = message["content"]
+        if message["role"] == "assistant":
+            content = format_answer_for_chat(content)
+        st.markdown(content)
         if message["role"] == "assistant":
             timestamp = message.get("timestamp")
             if timestamp:
                 st.caption(timestamp)
-            render_correction_info(message)
-            render_sources(message.get("citations", []))
-            if st.session_state.show_chunks:
-                render_chunks(message.get("chunks", []))
+            render_answer_details(message)
 
 
 def handle_query(prompt):
@@ -142,18 +253,18 @@ def handle_query(prompt):
                     "content": content,
                     "citations": result.get("citations", []),
                     "chunks": result.get("chunks", []),
+                    "visual_results": result.get("visual_results", []),
+                    "answer_mode": result.get("answer_mode"),
+                    "retrieval_summary": result.get("retrieval_summary"),
                     "was_corrected": result.get("was_corrected", False),
                     "grade_score": result.get("grade_score"),
                     "original_query": result.get("original_query", prompt),
                     "query_used": result.get("query_used", prompt),
                     "timestamp": datetime.now().strftime("%I:%M %p"),
                 }
-                st.markdown(content)
+                st.markdown(format_answer_for_chat(content))
                 st.caption(assistant_message["timestamp"])
-                render_correction_info(assistant_message)
-                render_sources(assistant_message["citations"])
-                if st.session_state.show_chunks:
-                    render_chunks(assistant_message["chunks"])
+                render_answer_details(assistant_message)
 
     st.session_state.messages.append(assistant_message)
 
@@ -162,7 +273,7 @@ init_state()
 
 with st.sidebar:
     st.title("Retriva")
-    st.caption("Retrieval-augmented chat over your PDFs")
+    st.caption("Automatic retrieval-augmented chat over your PDFs")
 
     uploaded_pdf = st.file_uploader(
         "Upload a PDF",
@@ -186,9 +297,7 @@ with st.sidebar:
             try:
                 result = ingest_pdf(uploaded_pdf)
                 st.session_state.indexed_docs.append(result)
-                st.success(
-                    f"Indexed {result['chunks']} chunks from {result['source']}."
-                )
+                st.success(format_ingest_result(result))
             except requests.RequestException as exc:
                 st.error(f"Ingestion failed: {exc}")
 
@@ -199,11 +308,13 @@ with st.sidebar:
             source = item["source"]
             if len(source) > 30:
                 source = source[:27] + "..."
-            st.write(f"{source} - {item['chunks']} chunks")
+            text_chunks = item.get("text", {}).get("chunks", 0)
+            visual_pages = item.get("visual", {}).get("pages", 0)
+            st.write(f"{source} - {text_chunks} chunks, {visual_pages} pages")
 
     st.divider()
     st.session_state.show_chunks = st.toggle(
-        "Show retrieved chunks",
+        "Include retrieved evidence in details",
         value=st.session_state.show_chunks,
     )
 
@@ -216,8 +327,18 @@ st.title("Chat with your documents")
 
 if st.session_state.indexed_docs:
     doc_count = len(st.session_state.indexed_docs)
-    chunk_count = sum(doc.get("chunks", 0) for doc in st.session_state.indexed_docs)
-    st.caption(f"Ready - {doc_count} document(s), {chunk_count} chunks")
+    chunk_count = sum(
+        doc.get("text", {}).get("chunks", 0)
+        for doc in st.session_state.indexed_docs
+    )
+    page_count = sum(
+        doc.get("visual", {}).get("pages", 0)
+        for doc in st.session_state.indexed_docs
+    )
+    st.caption(
+        f"Ready - {doc_count} document(s), "
+        f"{chunk_count} text chunks, {page_count} visual pages"
+    )
 else:
     st.caption("Upload and ingest a PDF, then ask a question.")
 
@@ -246,4 +367,3 @@ if st.session_state.pending_prompt:
 prompt = st.chat_input("Ask about your document")
 if prompt:
     handle_query(prompt)
-

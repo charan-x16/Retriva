@@ -222,6 +222,7 @@ eval_log.db
 eval_log.db-journal
 backend/evaluation/*.db
 backend/evaluation/*.db-journal
+storage/visual_pages/
 plain_write_test.txt
 test_eval*.db
 test_eval*.db-journal

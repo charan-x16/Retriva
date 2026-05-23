@@ -1,11 +1,27 @@
 """PDF parsers for embedded text, scanned text, and tabular content."""
 
-from io import BytesIO
+from contextlib import redirect_stderr, redirect_stdout
+from io import BytesIO, StringIO
+import logging
 from pathlib import Path
+import warnings
 
 import fitz
 import pytesseract
 from PIL import Image
+
+from backend.pdf_utils import quiet_mupdf
+
+quiet_mupdf()
+logging.getLogger("pypdf").setLevel(logging.ERROR)
+logging.getLogger("camelot").setLevel(logging.ERROR)
+logging.getLogger("pdfminer").setLevel(logging.ERROR)
+try:
+    from cryptography.utils import CryptographyDeprecationWarning
+
+    warnings.filterwarnings("ignore", category=CryptographyDeprecationWarning)
+except ImportError:
+    pass
 
 
 def parse_text_pdf(file_path) -> list[dict]:
@@ -87,7 +103,9 @@ def _read_tables(file_path):
 
     for flavor in ("lattice", "stream"):
         try:
-            tables = camelot.read_pdf(file_path, pages="all", flavor=flavor)
+            # Camelot/pypdf can print noisy repair warnings for signed PDFs.
+            with redirect_stdout(StringIO()), redirect_stderr(StringIO()):
+                tables = camelot.read_pdf(file_path, pages="all", flavor=flavor)
             if len(tables) > 0:
                 return tables
         except Exception:

@@ -29,8 +29,16 @@ Citation rules:
 Style:
 - Be clear, concise, and direct.
 - Start with the answer, not with filler such as "Based on the context".
-- Prefer one short paragraph for simple questions.
-- Use bullets only when the answer has several distinct items.
+- Write in a natural ChatGPT-like style.
+- Prefer short readable paragraphs for most answers.
+- For simple fact questions: write one direct sentence.
+- Never use a bullet list for a one-sentence answer.
+- Use bullets only when the user asks for a list/key points or when the answer
+  has several separate items that would be hard to read in paragraph form.
+- Do not write one dense paragraph with many comma-separated facts.
+- Prefer plain words over legal or bureaucratic phrasing.
+- For summaries of forms, IDs, or records, avoid unnecessary personal
+  identifiers unless the user directly asks for them.
 - Do not include a separate bibliography, sources section, or meta commentary.
 """.strip()
 
@@ -45,6 +53,12 @@ def build_answer_prompt(query, chunks) -> str:
         "2. Which facts need citations?\n"
         "3. Is any needed information missing or conflicting?\n\n"
         "If the answer is present, write the final answer only.\n"
+        "Format the answer for readability:\n"
+        "- Prefer short natural paragraphs.\n"
+        "- Use bullets only for requested lists or several separate points.\n"
+        "- Do not use bullets for a single direct answer.\n"
+        "- Include the citation at the end of the bullet or sentence.\n"
+        "- Do not merge many details into one long sentence.\n\n"
         "If the answer is not present, write: "
         "\"The provided document context does not contain enough information "
         "to answer this question.\" Then state the missing information in one "
