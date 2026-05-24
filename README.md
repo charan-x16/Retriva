@@ -1,151 +1,360 @@
 # Retriva
 
-Retriva is an automatic hybrid document RAG system for PDFs. It can read normal
-text PDFs, scanned PDFs, tables, and page layouts, then answer questions with
-grounded citations.
+Retriva is a self-correcting hybrid document RAG system for PDFs.
 
-The user experience is intentionally simple:
+It ingests normal text PDFs, scanned PDFs, tables, forms, charts, and visual
+page layouts, then answers questions with grounded citations. The interface
+stays simple: upload documents, search your library, ask questions, and inspect
+the evidence when needed.
 
 ```text
-Upload a PDF -> Ask a question -> Get a cited answer
+Upload PDFs -> Retriva indexes the right evidence -> Ask questions -> Get cited answers
 ```
 
-Behind that simple flow, Retriva combines text retrieval, OCR, sparse BM25,
-dense embeddings, reranking, CRAG-style self-correction, Ragas evaluation, and
-ColPali visual page retrieval.
+## Why Retriva Exists
 
-## What Retriva Can Do
+Most document QA systems work well only when the PDF is clean text. Real PDFs
+are messier. They contain scanned pages, forms, score cards, screenshots,
+tables, charts, signatures, stamps, and layouts where the answer may be visible
+but not available as clean text.
 
-| Capability | What it means |
+Retriva handles that by combining:
+
+- text extraction
+- OCR
+- table parsing
+- dense vector retrieval
+- BM25 sparse retrieval
+- reciprocal rank fusion
+- BGE reranking
+- CRAG-style self-correction
+- ColPali visual page retrieval
+- multimodal answer generation
+- Ragas-style evaluation
+
+The goal is not to expose all of that complexity to the user. The goal is to
+make the system choose the right evidence path automatically.
+
+## Current Capabilities
+
+| Area | What Retriva Does |
 | --- | --- |
-| Text PDF ingestion | Extracts embedded text page by page with PyMuPDF. |
-| Scanned PDF support | Uses page rendering plus Tesseract OCR when text is not embedded. |
-| Table extraction | Uses Camelot and converts tables into markdown-like text. |
-| Hybrid retrieval | Retrieves with Qdrant BM25 sparse vectors and BGE dense vectors. |
-| RRF fusion | Combines sparse and dense ranked results with reciprocal rank fusion. |
-| BGE reranking | Reranks candidate chunks before generation. |
-| CRAG correction | Grades retrieved context and rewrites weak queries automatically. |
-| Visual retrieval | Uses ColPali page-image embeddings for layout-heavy or scanned documents. |
-| Multimodal answering | Sends retrieved page images to a multimodal OpenRouter model when visual evidence is needed. |
-| Citation grounding | Keeps inline citations compact in chat and full sources in answer details. |
-| Evaluation dashboard | Logs queries to SQLite and computes Ragas-style quality scores. |
+| PDF ingestion | Repairs uploaded PDFs, extracts text, OCRs scanned pages, and extracts tables. |
+| Hybrid retrieval | Searches Qdrant with dense BGE vectors and sparse BM25 vectors. |
+| Fusion | Combines sparse and dense results with reciprocal rank fusion. |
+| Reranking | Uses a BGE reranker to select the strongest final chunks. |
+| Self-correction | Grades retrieved context and rewrites weak queries before answering. |
+| Visual retrieval | Uses ColPali when a document is scanned, image-heavy, low-text, or layout-heavy. |
+| Multimodal QA | Sends retrieved page images to a vision-capable OpenRouter model when needed. |
+| Citations | Produces inline citations and keeps full source details in a collapsed panel. |
+| Library | Shows indexed Qdrant documents in a searchable sidebar library. |
+| Evaluation | Logs queries to SQLite and computes faithfulness, relevancy, precision, and recall. |
+| Timing logs | Prints per-stage timings so latency bottlenecks are visible. |
 
-## How It Works
+## User Experience
 
-### 1. Ingestion
+Retriva is designed around a few simple actions.
 
-When you upload a PDF, Retriva indexes it in two parallel ways.
+1. Upload a PDF.
+2. Click `Ingest document`.
+3. Search the sidebar library to see what is indexed.
+4. Ask a question.
+5. Read the answer.
+6. Open `Answer details` only when you want sources, retrieval path, grades, or evidence.
 
-```mermaid
-flowchart TD
-    A[Upload PDF] --> B[Repair / normalize PDF]
-    B --> C[Text path]
-    B --> D[Visual path]
+The sidebar library is backed by Qdrant, not just Streamlit session state. If
+you refresh the page or restart Streamlit, indexed documents still show as long
+as they exist in Qdrant.
 
-    C --> C1[Extract embedded text]
-    C --> C2[OCR scanned pages if needed]
-    C --> C3[Extract tables with Camelot]
-    C1 --> C4[Chunk text]
-    C2 --> C4
-    C3 --> C4
-    C4 --> C5[BGE dense embeddings]
-    C4 --> C6[Qdrant BM25 sparse embeddings]
-    C5 --> E[Qdrant]
-    C6 --> E
-
-    D --> D1[Render PDF pages as images]
-    D1 --> D2[ColPali page embeddings]
-    D2 --> E
-    D1 --> D3[Save page images locally]
-```
-
-Text chunks are stored in Qdrant with dense and sparse vectors. Visual pages are
-stored in a separate Qdrant collection with ColPali multivectors. Rendered page
-images are saved locally so the multimodal LLM can inspect the retrieved pages.
-
-### 2. Querying
-
-When the user asks a question, Retriva first tries the text pipeline. If the
-retrieved text context is strong enough, it answers from text. If the context is
-weak, it automatically falls back to visual retrieval.
+## Architecture
 
 ```mermaid
 flowchart TD
-    A[User question] --> B[Text hybrid retrieval]
-    B --> C[BM25 sparse search]
-    B --> D[BGE dense search]
-    C --> E[RRF fusion]
-    D --> E
-    E --> F[BGE reranker]
-    F --> G[CRAG context grade]
+    U[User uploads PDF] --> A[PDF analyzer]
+    A --> T[Text and OCR pipeline]
+    A --> V{Needs visual indexing?}
 
-    G -->|Good context| H[Text answer generation]
-    G -->|Weak context| I[ColPali visual retrieval]
-    I --> J[Top page images]
-    J --> K[Multimodal answer generation]
+    T --> T1[PyMuPDF text extraction]
+    T --> T2[Tesseract OCR when needed]
+    T --> T3[Camelot table extraction]
+    T1 --> C[Chunking]
+    T2 --> C
+    T3 --> C
+    C --> D[BGE dense embeddings]
+    C --> S[Qdrant BM25 sparse vectors]
+    D --> Q[(Qdrant text collection)]
+    S --> Q
 
-    H --> L[Cited answer]
-    K --> L
+    V -->|Yes| V1[Render pages as images]
+    V -->|No| SKIP[Skip ColPali]
+    V1 --> V2[ColPali page embeddings]
+    V2 --> QV[(Qdrant visual collection)]
+    V1 --> IMG[Saved page images]
 ```
 
-The default text-grade threshold is configured by:
+At query time:
+
+```mermaid
+flowchart TD
+    Q[Question] --> L{Library inventory question?}
+    L -->|Yes| DOCS[Answer from Qdrant document list]
+    L -->|No| H[Hybrid text retrieval]
+
+    H --> B[BM25 sparse search]
+    H --> D[Dense vector search]
+    B --> RRF[RRF fusion]
+    D --> RRF
+    RRF --> RR[BGE reranker]
+    RR --> G[CRAG context grade]
+
+    G -->|Strong evidence| AT[Text answer generation]
+    G -->|Weak evidence| W[Query rewrite and retry]
+    W --> RR
+    G -->|Still weak and visual index exists| CV[ColPali visual retrieval]
+    CV --> VM[Multimodal page-image answer]
+
+    AT --> OUT[Cited answer]
+    VM --> OUT
+    DOCS --> OUT
+```
+
+## Automatic Visual Detection
+
+Retriva does not ask the user to choose between text and visual retrieval.
+
+During ingestion, `backend/ingestion/pdf_analyzer.py` inspects the PDF for:
+
+- low text density
+- scanned or image-like pages
+- meaningful embedded images
+- drawing-heavy or layout-heavy pages
+
+Then `VISUAL_INDEX_MODE` controls the decision:
 
 ```env
+VISUAL_INDEX_MODE=auto
+```
+
+Supported values:
+
+| Value | Behavior |
+| --- | --- |
+| `auto` | Use ColPali only when the PDF appears to need visual indexing. |
+| `always` | Always index every PDF with ColPali. |
+| `never` | Disable visual indexing. |
+
+Useful visual thresholds:
+
+```env
+VISUAL_MIN_TEXT_CHARS_PER_PAGE=120
+VISUAL_MIN_IMAGE_AREA_RATIO=0.15
+```
+
+## Retrieval Stack
+
+Retriva stores text chunks in Qdrant with two vector types:
+
+- dense BGE embedding vectors
+- sparse Qdrant BM25 vectors
+
+At query time, it retrieves from both paths, fuses the results, and reranks the
+best candidates:
+
+```text
+BM25 top results + dense top results -> RRF -> BGE reranker -> final chunks
+```
+
+The reranker is intentionally kept in the pipeline because it is a major quality
+layer. For practical CPU latency, the default lightweight reranker is:
+
+```env
+RERANKER_MODEL=BAAI/bge-reranker-base
+RERANKER_USE_FP16=false
+```
+
+If you have a strong GPU and want a larger model, you can switch back to:
+
+```env
+RERANKER_MODEL=BAAI/bge-reranker-v2-m3
+RERANKER_USE_FP16=true
+```
+
+## Self-Correction
+
+Retriva includes a simple CRAG-style correction loop:
+
+1. Retrieve with the original query.
+2. Rerank candidate chunks.
+3. Ask the LLM to grade whether the context answers the question.
+4. If weak, rewrite the query.
+5. Retrieve and rerank again.
+
+Configuration:
+
+```env
+ENABLE_CRAG=true
+ENABLE_QUERY_REWRITE=true
+CRAG_GRADE_THRESHOLD=0.7
 AUTO_TEXT_GRADE_THRESHOLD=0.7
 ```
 
-### 3. Answer Display
+If context is strong, Retriva answers immediately. If text context is weak and a
+visual index exists, Retriva can automatically try ColPali visual retrieval.
 
-Retriva keeps the main chat clean.
-
-In the chat bubble, citations are compact:
-
-```text
-Sanjay is the candidate named Chekka Sanjay Charan. [p. 1]
+```env
+ENABLE_VISUAL_FALLBACK=true
 ```
 
-The full source filename, retrieval path, context grade, query rewrite, and
-retrieved evidence are kept inside the collapsed `Answer details` panel.
+## Citation Style
+
+The backend generates full source tags:
+
+```text
+[Source: page 1, NATA_StatementOfMarks.pdf]
+```
+
+The chat UI compacts those tags for readability:
+
+```text
+[p. 1]
+```
+
+Full source filenames, retrieval path, context grade, query rewrite, and
+retrieved evidence are available in the collapsed `Answer details` panel.
+
+## Evaluation Dashboard
+
+Retriva logs every query to SQLite and computes evaluation metrics in the
+background. The Streamlit `Evaluation` page shows:
+
+- total logged queries
+- average faithfulness
+- average answer relevancy
+- average context precision
+- average context recall
+- a query table
+- a score chart
+- a button to recompute pending scores
+
+Metrics are stored by `backend/evaluation/logger.py`.
+
+Evaluation is configured with:
+
+```env
+RAGAS_EVAL_MODE=openrouter_judge
+RAGAS_OPENROUTER_BASE_URL=https://openrouter.ai/api/v1
+RAGAS_OPENROUTER_MODEL=openai/gpt-oss-120b:free
+RAGAS_EMBEDDING_MODEL=BAAI/bge-base-en-v1.5
+```
 
 ## Project Structure
 
 ```text
 retriva/
 |-- backend/
-|   |-- main.py                    # FastAPI app and automatic pipeline orchestration
-|   |-- ingestion/                 # PDF parsing, OCR, tables, chunking
-|   |-- retrieval/                 # Dense, sparse BM25, and fusion logic
-|   |-- reranker/                  # BGE reranker
-|   |-- correction/                # CRAG grading and query rewriting
-|   |-- generation/                # Text and multimodal answer generation
-|   |-- visual/                    # ColPali page retrieval
-|   |-- evaluation/                # SQLite logging and Ragas evaluation
-|   `-- db/                        # Qdrant setup and search helpers
+|   |-- main.py
+|   |-- pdf_utils.py
+|   |-- correction/
+|   |   |-- grader.py
+|   |   |-- pipeline.py
+|   |   `-- rewriter.py
+|   |-- db/
+|   |   `-- qdrant_client.py
+|   |-- evaluation/
+|   |   |-- logger.py
+|   |   `-- ragas_eval.py
+|   |-- generation/
+|   |   |-- answer_gen.py
+|   |   |-- llm_provider.py
+|   |   |-- prompt.py
+|   |   `-- vision_answer_gen.py
+|   |-- ingestion/
+|   |   |-- chunker.py
+|   |   |-- parsers.py
+|   |   `-- pdf_analyzer.py
+|   |-- reranker/
+|   |   `-- bge_reranker.py
+|   |-- retrieval/
+|   |   |-- bm25_retriever.py
+|   |   |-- dense_retriever.py
+|   |   `-- fusion.py
+|   `-- visual/
+|       |-- colpali_retriever.py
+|       `-- page_renderer.py
 |-- frontend/
-|   |-- app.py                     # Streamlit multipage router
+|   |-- app.py
 |   `-- pages/
-|       |-- 0_Chatbot.py           # Upload and chat page
-|       `-- 1_Evaluation.py        # Evaluation dashboard
-|-- storage/visual_pages/          # Generated page images, ignored by git
-|-- requirements.txt
+|       |-- 0_Chatbot.py
+|       `-- 1_Evaluation.py
+|-- storage/
+|   `-- visual_pages/
 |-- docker-compose.yml
-`-- .env.example
+|-- requirements.txt
+|-- .env.example
+`-- README.md
 ```
 
-## Main API Endpoints
+## API Reference
 
-| Endpoint | Purpose |
-| --- | --- |
-| `POST /ingest` | Upload one PDF and automatically build text plus visual indexes. |
-| `POST /query` | Ask a question and get one cited answer from the best evidence path. |
-| `GET /eval_logs` | Return logged queries and evaluation scores. |
-| `POST /eval_logs/recompute` | Re-run pending evaluation scores in the background. |
-| `POST /ingest_visual` | Debug endpoint for visual-only indexing. |
-| `POST /query_visual` | Debug endpoint for visual comparison retrieval. |
+| Endpoint | Method | Purpose |
+| --- | --- | --- |
+| `/ingest` | `POST` | Upload a PDF and automatically index text plus visual evidence when needed. |
+| `/query` | `POST` | Ask a question and receive answer, citations, chunks, visual results, grade, and query rewrite info. |
+| `/documents` | `GET` | List all indexed Qdrant documents with chunk and page counts. |
+| `/eval_logs` | `GET` | Return all logged evaluation rows. |
+| `/eval_logs/recompute` | `POST` | Queue recomputation for pending evaluation scores. |
+| `/ingest_visual` | `POST` | Debug endpoint for visual-only indexing. |
+| `/query_visual` | `POST` | Debug endpoint for visual comparison retrieval. |
+
+Example query request:
+
+```json
+{
+  "question": "What are the key findings?"
+}
+```
+
+Example query response shape:
+
+```json
+{
+  "answer": "The document states ... [Source: page 2, report.pdf]",
+  "citations": [{"page": 2, "source": "report.pdf"}],
+  "chunks": [],
+  "visual_results": [],
+  "answer_mode": "text_hybrid",
+  "retrieval_summary": {
+    "text_chunks": 5,
+    "visual_pages": 0
+  },
+  "was_corrected": false,
+  "grade_score": 0.92,
+  "original_query": "What are the key findings?",
+  "query_used": "What are the key findings?"
+}
+```
+
+Example library response:
+
+```json
+{
+  "total": 3,
+  "documents": [
+    {
+      "source": "Shift Handover Reports.pdf",
+      "text_chunks": 89,
+      "text_pages": 14,
+      "visual_pages": 0,
+      "has_text": true,
+      "has_visual": false
+    }
+  ]
+}
+```
 
 ## Setup
 
-### 1. Create and activate a virtual environment
+### 1. Create a virtual environment
 
 ```powershell
 python -m venv .venv
@@ -158,13 +367,13 @@ python -m venv .venv
 uv pip install -r requirements.txt
 ```
 
-If you are not using `uv`, regular pip also works:
+Regular pip also works:
 
 ```powershell
 pip install -r requirements.txt
 ```
 
-### 3. Configure environment variables
+### 3. Configure `.env`
 
 Copy the example file:
 
@@ -172,65 +381,60 @@ Copy the example file:
 Copy-Item .env.example .env
 ```
 
-Set your Qdrant and LLM keys in `.env`.
+Then add your Qdrant and LLM keys.
 
-Important defaults:
-
-```env
-EMBEDDING_MODEL=BAAI/bge-base-en-v1.5
-EMBEDDING_VECTOR_SIZE=768
-RERANKER_MODEL=BAAI/bge-reranker-v2-m3
-COLPALI_MODEL=vidore/colpali-v1.2
-MODEL_CACHE_DIR=.cache/models
-AUTO_TEXT_GRADE_THRESHOLD=0.7
-```
-
-For OpenRouter:
+Minimum cloud setup:
 
 ```env
+QDRANT_URL=https://your-qdrant-cloud-url
+QDRANT_API_KEY=your_qdrant_api_key_here
+QDRANT_COLLECTION_NAME=Retriva
+
 LLM_PROVIDER=openrouter
 OPENROUTER_API_KEY=your_openrouter_key_here
-OPENROUTER_MODEL=nvidia/nemotron-3-super-120b-a12b:free
-VISUAL_OPENROUTER_MODEL=google/gemma-4-31b-it:free
+OPENROUTER_MODEL=nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free
 ```
 
-You can use different OpenRouter models, but the visual model must support image
-input if you want multimodal visual answering.
+For local Streamlit development, the frontend defaults to:
+
+```text
+http://localhost:8000
+```
+
+For Docker Compose, use:
+
+```env
+BACKEND_URL=http://backend:8000
+```
 
 ### 4. Start Qdrant
 
-If you run Qdrant locally with Docker:
+If you use Qdrant Cloud, skip this step.
+
+Local Docker:
 
 ```powershell
 docker run -p 6333:6333 -v ${PWD}\qdrant_data:/qdrant/storage qdrant/qdrant
 ```
 
-Or use Qdrant Cloud and set:
+### 5. Start the backend
 
-```env
-QDRANT_URL=https://your-qdrant-cloud-url
-QDRANT_API_KEY=your_qdrant_api_key_here
-```
-
-### 5. Start backend
-
-For normal development:
-
-```powershell
-uvicorn backend.main:app --reload --reload-dir backend
-```
-
-For faster testing when you are not editing backend files:
+Fastest for testing:
 
 ```powershell
 uvicorn backend.main:app
 ```
 
-Avoid plain `--reload` on the whole repository if you are working on frontend
-files, because every reload clears the in-memory model cache and forces large
-models to load again.
+When editing backend code:
 
-### 6. Start frontend
+```powershell
+uvicorn backend.main:app --reload --reload-dir backend
+```
+
+Avoid plain `--reload` on the whole repository during frontend work. It reloads
+the backend and clears loaded models.
+
+### 6. Start the frontend
 
 ```powershell
 streamlit run frontend/app.py
@@ -242,118 +446,188 @@ Open:
 http://localhost:8501
 ```
 
-## Using The App
+## Common Commands
 
-1. Upload a PDF in the sidebar.
-2. Click `Ingest document`.
-3. Ask a question in the chat input.
-4. Read the answer.
-5. Open `Answer details` if you want sources, retrieval metadata, or evidence.
-6. Visit the `Evaluation` page to inspect logged questions and Ragas scores.
+Install dependencies:
 
-Try these prompts:
-
-```text
-Give me a concise summary of this document.
-What are the key findings?
-Who is mentioned in this document?
-What scores or totals are shown?
-Which pages support the answer?
+```powershell
+uv pip install -r requirements.txt
 ```
 
-## Evaluation
+Run backend:
 
-Retriva logs each query to SQLite through `backend/evaluation/logger.py`.
+```powershell
+uvicorn backend.main:app
+```
 
-Each log row stores:
+Run frontend:
 
-- question
-- answer
-- retrieved contexts
-- CRAG context grade
-- faithfulness
-- answer relevancy
-- context precision
-- context recall
+```powershell
+streamlit run frontend/app.py
+```
 
-Ragas scores run in the background so the chat response stays fast. If scores
-are pending, open the Evaluation page and click the recompute button.
+Check indexed documents:
 
-## Model Cache And Latency
+```powershell
+Invoke-RestMethod http://localhost:8000/documents
+```
 
-Downloaded models live under:
+Ask a question from PowerShell:
+
+```powershell
+Invoke-RestMethod `
+  -Uri http://localhost:8000/query `
+  -Method Post `
+  -ContentType "application/json" `
+  -Body '{"question":"Which documents do you have?"}'
+```
+
+## Configuration Guide
+
+### Qdrant
+
+```env
+QDRANT_URL=https://your-qdrant-cloud-url
+QDRANT_API_KEY=your_qdrant_api_key_here
+QDRANT_COLLECTION_NAME=Retriva
+QDRANT_DENSE_VECTOR_NAME=dense
+QDRANT_SPARSE_VECTOR_NAME=bm25
+QDRANT_RECREATE_COLLECTION=false
+QDRANT_CLOUD_INFERENCE=true
+```
+
+### Retrieval Models
+
+```env
+EMBEDDING_MODEL=BAAI/bge-base-en-v1.5
+EMBEDDING_VECTOR_SIZE=768
+BM25_MODEL=qdrant/bm25
+RERANKER_MODEL=BAAI/bge-reranker-base
+RERANKER_USE_FP16=false
+MODEL_CACHE_DIR=.cache/models
+```
+
+### Visual Retrieval
+
+```env
+VISUAL_INDEX_MODE=auto
+ENABLE_VISUAL_FALLBACK=true
+COLPALI_MODEL=vidore/colpali-v1.2
+COLPALI_COLLECTION_NAME=retriva_visual_pages
+VISUAL_PAGE_IMAGE_DIR=storage/visual_pages
+VISUAL_ANSWER_MAX_IMAGES=3
+```
+
+### Generation
+
+```env
+LLM_PROVIDER=openrouter
+OPENROUTER_API_KEY=your_openrouter_key_here
+OPENROUTER_BASE_URL=https://openrouter.ai/api/v1
+OPENROUTER_MODEL=nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free
+VISUAL_OPENROUTER_MODEL=nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free
+```
+
+The visual model must support image input for multimodal visual answers.
+
+## Performance Notes
+
+Retriva logs timing for important stages:
+
+```text
+retriva timing | retrieval.bm25 | 0.58s
+retriva timing | retrieval.dense | 0.45s
+retriva timing | retrieval.rerank | 4.20s
+retriva timing | query.answer_generation | 2.65s
+retriva timing | query.total | 8.30s
+```
+
+Use these logs to find the real bottleneck.
+
+Common bottlenecks:
+
+| Stage | Why it can be slow | Practical fix |
+| --- | --- | --- |
+| `ingest.text_parse` | OCR or table extraction is expensive | Expected for scans and table-heavy PDFs. |
+| `ingest.embed_dense_chunks` | Embedding many chunks on CPU | Keep chunking reasonable or use GPU. |
+| `retrieval.rerank` | Cross-encoder reranking is heavier than vector search | Use `BAAI/bge-reranker-base` for CPU. |
+| `query.answer_generation` | Remote LLM provider latency | Try another provider/model or retry later. |
+| `ingest.visual_index` | ColPali is a large visual model | Keep `VISUAL_INDEX_MODE=auto`. |
+
+Downloaded models are cached here:
 
 ```text
 .cache/models
 ```
 
-This avoids re-downloading, but large models still need time to load into RAM
-after a backend restart.
-
-Common latency causes:
-
-| Symptom | Reason | Fix |
-| --- | --- | --- |
-| ColPali loads for 40-60 seconds | Large model loading from disk into RAM/VRAM | Avoid unnecessary backend reloads. |
-| Backend reloads after frontend edits | `uvicorn --reload` watches the whole repo | Use `--reload-dir backend`. |
-| Slow answer generation | Free remote OpenRouter provider is slow or busy | Try another model or bring your own provider key. |
-| First query is slower | Embedding/reranker models warm up on first use | Normal after restart. |
-
-## System Requirements
-
-Python dependencies are listed in `requirements.txt`.
-
-Host tools:
-
-- Tesseract OCR for scanned PDFs
-- Ghostscript for some Camelot table extraction paths
-- Docker if you run Qdrant locally
-
-Optional:
-
-- CUDA GPU for faster local model inference
-- Hugging Face token to avoid unauthenticated model-download limits
-
-```env
-HF_TOKEN=your_huggingface_token_here
-```
+Caching avoids re-downloads, but models still need to load into memory after a
+backend restart.
 
 ## Troubleshooting
 
-### OpenRouter 429 rate limit
+### The sidebar library says fewer docs than expected
 
-If you see:
+Check the backend directly:
 
-```text
-Error code: 429
-temporarily rate-limited upstream
+```powershell
+Invoke-RestMethod http://localhost:8000/documents
 ```
 
-The model provider is rate-limiting the request. Retrieval may have worked, but
-answer generation was blocked. Retry later, switch models, or add your own
-provider key in OpenRouter integrations.
+If the API shows the correct documents, refresh Streamlit. If the API does not,
+the documents are not currently in the configured Qdrant collection.
 
-### PDF parser warnings
+### Asking "which docs do you have?" gives a content answer
 
-Some signed or malformed PDFs trigger PyMuPDF, pypdf, or Camelot warnings.
-Retriva attempts to repair uploaded PDFs before ingestion and suppresses noisy
-parser logs where possible.
+Retriva now detects library inventory questions and answers directly from
+`/documents`. Restart the backend if you still see old behavior.
 
-### Existing Qdrant schema mismatch
+### XLMRobertaTokenizerFast warning
 
-If you changed vector names, model sizes, or collection settings, create a new
-collection or temporarily set:
+You may see:
+
+```text
+You're using a XLMRobertaTokenizerFast tokenizer...
+```
+
+This comes from the BGE reranker stack. It is a warning, not a failure.
+
+### OpenRouter 429
+
+If a free OpenRouter model is temporarily rate-limited, retrieval may succeed
+but answer generation can fail. Retry later or switch to another available
+OpenRouter model.
+
+### PDF repair warnings
+
+Signed or malformed PDFs can trigger parser warnings. Retriva repairs uploaded
+PDFs when possible and suppresses noisy parser output where it is safe to do so.
+
+### Qdrant schema mismatch
+
+If you change vector names or vector sizes, use a new collection or temporarily
+set:
 
 ```env
 QDRANT_RECREATE_COLLECTION=true
 ```
 
-Then set it back to `false` after the collection is recreated.
+Set it back to `false` after recreation.
+
+## Development Notes
+
+- Prompt text lives in `backend/generation/prompt.py`.
+- Text generation lives in `backend/generation/answer_gen.py`.
+- Visual answer generation lives in `backend/generation/vision_answer_gen.py`.
+- CRAG correction lives in `backend/correction/`.
+- Qdrant document library listing lives in `backend/db/qdrant_client.py` and
+  `backend/visual/colpali_retriever.py`.
+- Streamlit chatbot UI lives in `frontend/pages/0_Chatbot.py`.
+- Evaluation UI lives in `frontend/pages/1_Evaluation.py`.
 
 ## Design Principle
 
-Retriva should feel simple to the user and sophisticated under the hood.
+Retriva should be simple on the surface and capable underneath.
 
-The user should not need to choose between OCR, dense retrieval, BM25, visual
-retrieval, reranking, or self-correction. They upload any PDF, ask a question,
-and Retriva chooses the best evidence path automatically.
+The user should not have to know whether a document needs OCR, BM25, dense
+retrieval, reranking, visual page embeddings, or query rewriting. They should
+upload any PDF, ask a question, and receive a grounded answer with evidence.

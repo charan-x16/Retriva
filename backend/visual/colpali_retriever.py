@@ -143,21 +143,78 @@ def get_visual_collection_name() -> str:
     return os.getenv("COLPALI_COLLECTION_NAME", "retriva_visual_pages")
 
 
+def visual_index_has_points(collection_name=None) -> bool:
+    """Return whether the visual collection exists and contains page vectors."""
+
+    load_dotenv()
+    collection_name = collection_name or get_visual_collection_name()
+    client = _visual_qdrant_client()
+    if not _collection_exists(client, collection_name):
+        return False
+
+    try:
+        result = client.count(collection_name=collection_name, exact=False)
+        return int(result.count) > 0
+    except Exception:
+        return False
+
+
+def list_visual_documents(collection_name=None) -> list[dict]:
+    """Return unique document names and visual page counts from Qdrant."""
+
+    load_dotenv()
+    collection_name = collection_name or get_visual_collection_name()
+    client = _visual_qdrant_client()
+    if not _collection_exists(client, collection_name):
+        return []
+
+    documents = {}
+    try:
+        offset = None
+        while True:
+            points, offset = client.scroll(
+                collection_name=collection_name,
+                limit=256,
+                offset=offset,
+                with_payload=True,
+                with_vectors=False,
+            )
+            for point in points:
+                payload = dict(point.payload or {})
+                source = payload.get("source")
+                if not source:
+                    continue
+
+                item = documents.setdefault(
+                    source,
+                    {
+                        "source": source,
+                        "visual_pages": set(),
+                    },
+                )
+                if payload.get("page"):
+                    item["visual_pages"].add(payload["page"])
+
+            if offset is None:
+                break
+    except Exception:
+        return []
+
+    results = []
+    for item in documents.values():
+        results.append(
+            {
+                "source": item["source"],
+                "visual_pages": len(item["visual_pages"]),
+            }
+        )
+    return sorted(results, key=lambda item: item["source"].lower())
+
+
 def _init_visual_qdrant(collection_name) -> QdrantClient:
     """Connect to Qdrant and ensure the ColPali collection exists."""
 
-    load_dotenv()
-    qdrant_url = (
-        os.getenv("QDRANT_URL")
-        or os.getenv("QDRANT_ENDPOINT")
-        or os.getenv("QDARANT_ENDPOINT")
-        or "http://localhost:6333"
-    )
-    client = QdrantClient(
-        url=qdrant_url,
-        api_key=os.getenv("QDRANT_API_KEY") or None,
-        timeout=_visual_timeout(),
-    )
+    client = _visual_qdrant_client()
 
     if not _collection_exists(client, collection_name):
         client.create_collection(
@@ -175,6 +232,24 @@ def _init_visual_qdrant(collection_name) -> QdrantClient:
         )
     else:
         _ensure_visual_schema(client, collection_name)
+    return client
+
+
+def _visual_qdrant_client() -> QdrantClient:
+    """Create a Qdrant client for visual index operations."""
+
+    load_dotenv()
+    qdrant_url = (
+        os.getenv("QDRANT_URL")
+        or os.getenv("QDRANT_ENDPOINT")
+        or os.getenv("QDARANT_ENDPOINT")
+        or "http://localhost:6333"
+    )
+    client = QdrantClient(
+        url=qdrant_url,
+        api_key=os.getenv("QDRANT_API_KEY") or None,
+        timeout=_visual_timeout(),
+    )
     return client
 
 

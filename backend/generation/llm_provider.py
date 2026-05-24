@@ -13,7 +13,7 @@ class LLMProvider(ABC):
     """Abstract interface for text generation providers."""
 
     @abstractmethod
-    def generate(self, prompt: str) -> str:
+    def generate(self, prompt: str, system_prompt: str | None = None) -> str:
         """Generate text for a prompt."""
 
 
@@ -25,13 +25,14 @@ class OpenAIProvider(LLMProvider):
         self.model = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
         self.client = OpenAI()
 
-    def generate(self, prompt: str) -> str:
+    def generate(self, prompt: str, system_prompt: str | None = None) -> str:
         """Generate an answer with the configured OpenAI model."""
 
+        system_content = system_prompt if system_prompt is not None else SYSTEM_PROMPT
         response = self.client.chat.completions.create(
             model=self.model,
             messages=[
-                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "system", "content": system_content},
                 {"role": "user", "content": prompt},
             ],
             temperature=0,
@@ -60,13 +61,14 @@ class OpenRouterProvider(LLMProvider):
             ),
         )
 
-    def generate(self, prompt: str) -> str:
+    def generate(self, prompt: str, system_prompt: str | None = None) -> str:
         """Generate an answer with the configured OpenRouter model."""
 
+        system_content = system_prompt if system_prompt is not None else SYSTEM_PROMPT
         response = self.client.chat.completions.create(
             model=self.model,
             messages=[
-                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "system", "content": system_content},
                 {"role": "user", "content": prompt},
             ],
             temperature=0,

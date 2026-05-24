@@ -14,6 +14,32 @@ BACKEND_URL = os.getenv("BACKEND_URL", "http://localhost:8000").rstrip("/")
 SOURCE_TAG_RE = re.compile(r"\[Source:\s*page\s+(\d+),\s*[^\]]+\]")
 
 
+def backend_urls():
+    """Return backend URLs to try from the Streamlit process."""
+
+    urls = [BACKEND_URL]
+    localhost = "http://localhost:8000"
+    if localhost not in urls:
+        urls.append(localhost)
+    return urls
+
+
+def backend_request(method, path, **kwargs):
+    """Call the backend, falling back to localhost for local development."""
+
+    errors = []
+    for base_url in backend_urls():
+        try:
+            response = requests.request(method, f"{base_url}{path}", **kwargs)
+            response.raise_for_status()
+            return response
+        except requests.RequestException as exc:
+            errors.append(f"{base_url}: {exc}")
+
+    message = "Backend request failed. Tried " + " | ".join(errors)
+    raise requests.RequestException(message)
+
+
 def init_state():
     """Initialize Streamlit session state."""
 
@@ -33,8 +59,7 @@ def ingest_pdf(uploaded_pdf):
             "application/pdf",
         )
     }
-    response = requests.post(f"{BACKEND_URL}/ingest", files=files, timeout=1800)
-    response.raise_for_status()
+    response = backend_request("POST", "/ingest", files=files, timeout=1800)
     return response.json()
 
 
@@ -56,13 +81,20 @@ def format_ingest_result(result):
 def ask_question(question):
     """Send a user question to the backend query endpoint."""
 
-    response = requests.post(
-        f"{BACKEND_URL}/query",
+    response = backend_request(
+        "POST",
+        "/query",
         json={"question": question},
         timeout=1800,
     )
-    response.raise_for_status()
     return response.json()
+
+
+def fetch_documents():
+    """Fetch the indexed document library from the backend."""
+
+    response = backend_request("GET", "/documents", timeout=30)
+    return response.json().get("documents", [])
 
 
 def format_answer_for_chat(answer):
@@ -83,6 +115,67 @@ def render_sources(citations):
         source = str(citation.get("source", "unknown"))
         lines.append(f"- Source: page {page}, {source}")
     st.markdown("\n".join(lines))
+
+
+def render_library(documents):
+    """Render a searchable tabbed library of indexed Qdrant documents."""
+
+    if not documents:
+        st.caption("No indexed documents in Qdrant yet.")
+        return
+
+    search_term = st.text_input(
+        "Search documents",
+        key="library_search",
+        placeholder="Search library",
+        label_visibility="collapsed",
+    ).strip().lower()
+
+    filtered_docs = [
+        document
+        for document in documents
+        if search_term in str(document.get("source", "")).lower()
+    ]
+    text_docs = [document for document in filtered_docs if document.get("has_text")]
+    visual_docs = [
+        document for document in filtered_docs if document.get("has_visual")
+    ]
+
+    st.caption(
+        f"{len(filtered_docs)} of {len(documents)} document(s)"
+        if search_term
+        else f"{len(documents)} document(s) in Qdrant"
+    )
+
+    with st.expander("Browse documents", expanded=bool(search_term)):
+        all_tab, text_tab, visual_tab = st.tabs(["All", "Text", "Visual"])
+        with all_tab:
+            render_library_documents(filtered_docs)
+        with text_tab:
+            render_library_documents(text_docs)
+        with visual_tab:
+            render_library_documents(visual_docs)
+
+
+def render_library_documents(documents):
+    """Render compact document cards inside one library tab."""
+
+    if not documents:
+        st.caption("No matching documents.")
+        return
+
+    for item in documents:
+        source = str(item.get("source", "unknown"))
+        text_chunks = item.get("text_chunks", 0)
+        text_pages = item.get("text_pages", 0)
+        visual_pages = item.get("visual_pages", 0)
+        with st.container(border=True):
+            st.markdown(f"**{source}**")
+            st.caption(
+                f"{text_chunks} chunks | "
+                f"{text_pages} text pages | "
+                f"{visual_pages} visual pages"
+            )
 
 
 def render_chunks(chunks, *, use_expander=True):
@@ -164,6 +257,7 @@ def render_correction_info(message):
             "visual_missing_images": "Visual index needs re-ingestion",
             "generation_rate_limited": "Generation rate-limited",
             "generation_error": "Generation failed",
+            "library_inventory": "Library inventory",
         }
         st.caption(f"Answer path: {labels.get(answer_mode, answer_mode)}")
 
@@ -270,6 +364,7 @@ def handle_query(prompt):
 
 
 init_state()
+library_docs = []
 
 with st.sidebar:
     st.title("Retriva")
@@ -301,16 +396,14 @@ with st.sidebar:
             except requests.RequestException as exc:
                 st.error(f"Ingestion failed: {exc}")
 
-    if st.session_state.indexed_docs:
-        st.divider()
-        st.subheader("Library")
-        for item in st.session_state.indexed_docs:
-            source = item["source"]
-            if len(source) > 30:
-                source = source[:27] + "..."
-            text_chunks = item.get("text", {}).get("chunks", 0)
-            visual_pages = item.get("visual", {}).get("pages", 0)
-            st.write(f"{source} - {text_chunks} chunks, {visual_pages} pages")
+    st.divider()
+    st.subheader("Library")
+    try:
+        library_docs = fetch_documents()
+        render_library(library_docs)
+    except requests.RequestException as exc:
+        st.caption("Could not load Qdrant library.")
+        st.caption(str(exc))
 
     st.divider()
     st.session_state.show_chunks = st.toggle(
@@ -325,16 +418,10 @@ with st.sidebar:
 
 st.title("Chat with your documents")
 
-if st.session_state.indexed_docs:
-    doc_count = len(st.session_state.indexed_docs)
-    chunk_count = sum(
-        doc.get("text", {}).get("chunks", 0)
-        for doc in st.session_state.indexed_docs
-    )
-    page_count = sum(
-        doc.get("visual", {}).get("pages", 0)
-        for doc in st.session_state.indexed_docs
-    )
+if library_docs:
+    doc_count = len(library_docs)
+    chunk_count = sum(doc.get("text_chunks", 0) for doc in library_docs)
+    page_count = sum(doc.get("visual_pages", 0) for doc in library_docs)
     st.caption(
         f"Ready - {doc_count} document(s), "
         f"{chunk_count} text chunks, {page_count} visual pages"
@@ -342,7 +429,7 @@ if st.session_state.indexed_docs:
 else:
     st.caption("Upload and ingest a PDF, then ask a question.")
 
-if not st.session_state.messages and st.session_state.indexed_docs:
+if not st.session_state.messages and library_docs:
     st.markdown("##### Try a quick prompt")
     suggestions = [
         ("Summarize", "Give me a concise summary of this document."),

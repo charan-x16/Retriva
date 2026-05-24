@@ -8,6 +8,8 @@ from pathlib import Path
 from dotenv import load_dotenv
 from openai import OpenAI
 
+from backend.generation.prompt import VISUAL_SYSTEM_PROMPT, build_visual_user_content
+
 SOURCE_RE = re.compile(r"\[Source:\s*page\s+(\d+),\s*([^\]]+)\]")
 
 
@@ -31,8 +33,11 @@ def generate_visual_answer(query, visual_results) -> dict:
     response = client.chat.completions.create(
         model=_visual_model_name(),
         messages=[
-            {"role": "system", "content": _system_prompt()},
-            {"role": "user", "content": _user_content(query, image_items)},
+            {"role": "system", "content": VISUAL_SYSTEM_PROMPT},
+            {
+                "role": "user",
+                "content": build_visual_user_content(query, image_items),
+            },
         ],
         temperature=0,
     )
@@ -94,73 +99,6 @@ def _image_data_url(image_path) -> str:
 
     encoded = base64.b64encode(Path(image_path).read_bytes()).decode("ascii")
     return f"data:image/jpeg;base64,{encoded}"
-
-
-def _system_prompt() -> str:
-    """Return the visual document QA system prompt."""
-
-    return (
-        "You are Retriva's visual document QA assistant. Answer only from the "
-        "provided PDF page images. Be clear, concise, and specific.\n\n"
-        "Readability rules:\n"
-        "- Write in a natural ChatGPT-like style.\n"
-        "- Prefer short readable paragraphs.\n"
-        "- For simple fact questions, write one direct sentence.\n"
-        "- Never use a bullet list for a one-sentence answer.\n"
-        "- Use bullets only when the user asks for a list/key points or when "
-        "there are several separate items.\n"
-        "- Do not compress many facts into one long sentence.\n"
-        "- Avoid unnecessary personal details unless the user asks for them.\n\n"
-        "Grounding rules:\n"
-        "- If the images do not contain enough evidence, say that clearly.\n"
-        "- Cite every factual bullet or sentence with "
-        "[Source: page X, filename].\n"
-        "- Do not cite pages that were not provided."
-    )
-
-
-def _user_content(query, image_items) -> list[dict]:
-    """Build a multimodal user message with question, page map, and images."""
-
-    page_map = "\n".join(
-        (
-            f"- Page {item['page']}, {item['source']} "
-            f"(retrieval score: {_format_score(item.get('score'))})"
-        )
-        for item in image_items
-    )
-    content = [
-        {
-            "type": "text",
-            "text": (
-                "Answer the question using only the attached retrieved PDF "
-                "page images.\n\n"
-                f"Question: {query}\n\n"
-                f"Available source pages:\n{page_map}\n\n"
-                "Write a clean readable answer. Prefer natural paragraphs. "
-                "Use bullets only when they genuinely improve readability. "
-                "Required citation format: [Source: page X, actual filename]. "
-                "Do not include the literal word 'filename'."
-            ),
-        }
-    ]
-
-    for item in image_items:
-        content.append(
-            {
-                "type": "image_url",
-                "image_url": {"url": item["data_url"]},
-            }
-        )
-    return content
-
-
-def _format_score(score) -> str:
-    """Format an optional retrieval score for the prompt."""
-
-    if score is None:
-        return "unknown"
-    return f"{float(score):.3f}"
 
 
 def _extract_citations(answer) -> list[dict]:

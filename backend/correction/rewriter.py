@@ -1,18 +1,16 @@
 """Query rewriting for weak retrieval results."""
 
+from backend.generation.prompt import (
+    INTERNAL_SYSTEM_PROMPT,
+    build_query_rewrite_prompt,
+)
+
 
 def rewrite_query(llm, original_query) -> str:
     """Rewrite a query to improve retrieval specificity."""
 
-    prompt = (
-        "Internal retrieval query rewrite. This is not a final user answer.\n"
-        "Rewrite this search query to be more specific and retrieve better results.\n"
-        "Keep the user's intent unchanged.\n"
-        "Return ONLY the rewritten query. Nothing else.\n\n"
-        f"Original query: {original_query}"
-    )
-
-    rewritten = llm.generate(prompt).strip()
+    prompt = build_query_rewrite_prompt(original_query)
+    rewritten = llm.generate(prompt, system_prompt=INTERNAL_SYSTEM_PROMPT).strip()
     return _clean_rewrite(rewritten) or original_query
 
 
@@ -24,4 +22,3 @@ def _clean_rewrite(text) -> str:
         if text.lower().startswith(prefix.lower()):
             return text[len(prefix) :].strip().strip('"').strip("'")
     return text
-

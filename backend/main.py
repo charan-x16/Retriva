@@ -1,7 +1,10 @@
 """FastAPI entrypoint for automatic document ingestion and grounded querying."""
 
+import logging
 import os
+from contextlib import contextmanager
 from pathlib import Path
+from time import perf_counter
 from tempfile import TemporaryDirectory
 
 import fitz
@@ -10,7 +13,11 @@ from fastapi import BackgroundTasks, FastAPI, File, HTTPException, UploadFile
 from pydantic import BaseModel
 
 from backend.correction.pipeline import self_correcting_retrieve
-from backend.db.qdrant_client import init_qdrant, upsert_chunks
+from backend.db.qdrant_client import (
+    init_qdrant,
+    list_indexed_documents,
+    upsert_chunks,
+)
 from backend.evaluation.logger import (
     get_all_logs,
     init_db,
@@ -22,6 +29,7 @@ from backend.generation.answer_gen import generate_answer
 from backend.generation.llm_provider import get_llm_provider
 from backend.generation.vision_answer_gen import generate_visual_answer
 from backend.ingestion.chunker import chunk_documents
+from backend.ingestion.pdf_analyzer import analyze_pdf, should_index_visual
 from backend.ingestion.parsers import detect_and_parse
 from backend.pdf_utils import quiet_mupdf, repair_pdf
 from backend.reranker.bge_reranker import load_reranker
@@ -33,8 +41,10 @@ from backend.retrieval.dense_retriever import (
 from backend.visual.colpali_retriever import (
     get_visual_collection_name,
     index_pdf_pages,
+    list_visual_documents,
     load_colpali_model,
     retrieve_visual,
+    visual_index_has_points,
 )
 
 load_dotenv()
@@ -42,6 +52,7 @@ quiet_mupdf()
 
 app = FastAPI(title="Retriva", version="0.1.0")
 init_db()
+logger = logging.getLogger("uvicorn.error")
 
 _qdrant_client = None
 _embedding_model = None
@@ -121,9 +132,28 @@ def get_colpali():
     return _colpali_model, _colpali_processor
 
 
+@contextmanager
+def timed_stage(label):
+    """Log how long one backend stage takes."""
+
+    started_at = perf_counter()
+    try:
+        yield
+    finally:
+        elapsed = perf_counter() - started_at
+        logger.info("retriva timing | %s | %.2fs", label, elapsed)
+
+
+def timed_call(label, func, *args, **kwargs):
+    """Run a callable and log its elapsed time."""
+
+    with timed_stage(label):
+        return func(*args, **kwargs)
+
+
 @app.post("/ingest")
 async def ingest_pdf(file: UploadFile = File(...)):
-    """Ingest one PDF into text, sparse, and visual indexes automatically."""
+    """Ingest one PDF into text and, when useful, visual indexes."""
 
     filename = Path(file.filename or "upload.pdf").name
     if not filename.lower().endswith(".pdf"):
@@ -132,12 +162,37 @@ async def ingest_pdf(file: UploadFile = File(...)):
     with TemporaryDirectory() as temp_dir:
         file_path = Path(temp_dir) / filename
         file_path.write_bytes(await file.read())
-        ingest_path = _prepare_pdf_for_ingestion(file_path)
+        ingest_path = timed_call(
+            "ingest.prepare_pdf",
+            _prepare_pdf_for_ingestion,
+            file_path,
+        )
+        analysis = timed_call("ingest.analyze_pdf", analyze_pdf, ingest_path)
 
-        text_result = _ingest_text_index(ingest_path, filename)
-        visual_result = _ingest_visual_index(ingest_path, filename)
+        text_result = timed_call(
+            "ingest.text_index",
+            _ingest_text_index,
+            ingest_path,
+            filename,
+        )
+        should_visual, visual_reason = should_index_visual(analysis, text_result)
+        if should_visual:
+            visual_result = timed_call(
+                "ingest.visual_index",
+                _ingest_visual_index,
+                ingest_path,
+                filename,
+            )
+            visual_result["decision_reason"] = visual_reason
+        else:
+            visual_result = {
+                "status": "skipped",
+                "source": filename,
+                "pages": analysis.get("pages", 0),
+                "reason": visual_reason,
+            }
 
-    if text_result["status"] == "failed" and visual_result["status"] == "failed":
+    if text_result["status"] == "failed" and visual_result["status"] != "indexed":
         raise HTTPException(
             status_code=400,
             detail="Could not index this PDF with either text or visual retrieval.",
@@ -148,6 +203,7 @@ async def ingest_pdf(file: UploadFile = File(...)):
         "source": filename,
         "text": text_result,
         "visual": visual_result,
+        "analysis": _public_pdf_analysis(analysis),
     }
 
 
@@ -185,6 +241,7 @@ async def ingest_visual_pdf(file: UploadFile = File(...)):
 def query_docs(request: QueryRequest, background_tasks: BackgroundTasks):
     """Answer a question with hybrid retrieval, reranking, and citations."""
 
+    total_started_at = perf_counter()
     question = request.question.strip()
     if not question:
         raise HTTPException(status_code=400, detail="Question is required.")
@@ -202,13 +259,29 @@ def query_docs(request: QueryRequest, background_tasks: BackgroundTasks):
             "query_used": question,
         }
 
-    llm = get_llm()
+    if _is_library_question(question):
+        return _library_answer_response(question)
 
-    text_result = _try_retrieve_text_evidence(llm, question, top_k=5)
+    llm = timed_call("query.load_llm_provider", get_llm)
+
+    text_result = timed_call(
+        "query.text_retrieval",
+        _try_retrieve_text_evidence,
+        llm,
+        question,
+        top_k=5,
+    )
     visual_results = []
-    if _should_retrieve_visual(text_result):
-        visual_results = _try_retrieve_visual_evidence(question, top_k=5)
-    answer_payload = _generate_auto_answer(
+    if _should_retrieve_visual(text_result) and _visual_fallback_enabled():
+        visual_results = timed_call(
+            "query.visual_retrieval",
+            _try_retrieve_visual_evidence,
+            question,
+            top_k=5,
+        )
+    answer_payload = timed_call(
+        "query.answer_generation",
+        _generate_auto_answer,
         llm,
         question,
         text_result,
@@ -234,7 +307,7 @@ def query_docs(request: QueryRequest, background_tasks: BackgroundTasks):
             get_embedding_model(),
         )
 
-    return {
+    response = {
         "answer": answer_payload["answer"],
         "citations": answer_payload["citations"],
         "chunks": text_result.get("chunks", []),
@@ -246,6 +319,11 @@ def query_docs(request: QueryRequest, background_tasks: BackgroundTasks):
         "original_query": question,
         "query_used": text_result.get("query_used", question),
     }
+    logger.info(
+        "retriva timing | query.total | %.2fs",
+        perf_counter() - total_started_at,
+    )
+    return response
 
 
 @app.post("/query_visual")
@@ -293,6 +371,17 @@ def eval_logs():
     return get_all_logs()
 
 
+@app.get("/documents")
+def documents():
+    """Return document names and counts currently stored in Qdrant."""
+
+    merged = _current_documents()
+    return {
+        "total": len(merged),
+        "documents": merged,
+    }
+
+
 @app.post("/eval_logs/recompute")
 def recompute_eval_logs(background_tasks: BackgroundTasks):
     """Re-run Ragas for logged rows that still have pending scores."""
@@ -329,6 +418,66 @@ def _is_greeting(text: str) -> bool:
     return normalized in GREETING_WORDS
 
 
+def _is_library_question(text: str) -> bool:
+    """Return whether the user is asking what documents are indexed."""
+
+    normalized = " ".join(text.lower().strip(" .,!?\n\t").split())
+    inventory_terms = (
+        "which docs",
+        "what docs",
+        "which documents",
+        "what documents",
+        "which files",
+        "what files",
+        "docs do you have",
+        "documents do you have",
+        "files do you have",
+        "show library",
+        "list docs",
+        "list documents",
+        "list files",
+        "stored in qdrant",
+    )
+    return any(term in normalized for term in inventory_terms)
+
+
+def _library_answer_response(question: str) -> dict:
+    """Build a direct answer from the indexed document library."""
+
+    docs = _current_documents()
+    if not docs:
+        answer = "No documents are currently indexed in Qdrant."
+    else:
+        names = ", ".join(doc["source"] for doc in docs)
+        answer = f"I currently have {len(docs)} document(s): {names}."
+
+    log_query(question, answer, [], None)
+    return {
+        "answer": answer,
+        "citations": [],
+        "chunks": [],
+        "visual_results": [],
+        "answer_mode": "library_inventory",
+        "retrieval_summary": {
+            "text_chunks": sum(doc.get("text_chunks", 0) for doc in docs),
+            "visual_pages": sum(doc.get("visual_pages", 0) for doc in docs),
+            "document_count": len(docs),
+        },
+        "was_corrected": False,
+        "grade_score": None,
+        "original_query": question,
+        "query_used": question,
+    }
+
+
+def _current_documents() -> list[dict]:
+    """Return merged text and visual document summaries from Qdrant."""
+
+    text_documents = list_indexed_documents(get_qdrant_client())
+    visual_documents = list_visual_documents(get_visual_collection_name())
+    return _merge_document_indexes(text_documents, visual_documents)
+
+
 def _prepare_pdf_for_ingestion(file_path: Path) -> str:
     """Return a repaired PDF path when PyMuPDF can clean the upload."""
 
@@ -338,12 +487,59 @@ def _prepare_pdf_for_ingestion(file_path: Path) -> str:
         return str(file_path)
 
 
+def _public_pdf_analysis(analysis) -> dict:
+    """Return compact PDF analysis details for the ingest response."""
+
+    return {
+        "pages": analysis.get("pages", 0),
+        "avg_text_chars_per_page": analysis.get("avg_text_chars_per_page", 0),
+        "low_text_pages": analysis.get("low_text_pages", 0),
+        "meaningful_image_pages": analysis.get("meaningful_image_pages", 0),
+        "scanned_like_pages": analysis.get("scanned_like_pages", 0),
+        "drawing_heavy_pages": analysis.get("drawing_heavy_pages", 0),
+    }
+
+
+def _merge_document_indexes(text_documents, visual_documents) -> list[dict]:
+    """Merge text and visual Qdrant document summaries by filename."""
+
+    merged = {}
+    for item in text_documents:
+        source = item["source"]
+        merged[source] = {
+            "source": source,
+            "text_chunks": item.get("text_chunks", 0),
+            "text_pages": item.get("text_pages", 0),
+            "visual_pages": 0,
+            "has_text": item.get("text_chunks", 0) > 0,
+            "has_visual": False,
+        }
+
+    for item in visual_documents:
+        source = item["source"]
+        entry = merged.setdefault(
+            source,
+            {
+                "source": source,
+                "text_chunks": 0,
+                "text_pages": 0,
+                "visual_pages": 0,
+                "has_text": False,
+                "has_visual": False,
+            },
+        )
+        entry["visual_pages"] = item.get("visual_pages", 0)
+        entry["has_visual"] = item.get("visual_pages", 0) > 0
+
+    return sorted(merged.values(), key=lambda item: item["source"].lower())
+
+
 def _ingest_text_index(file_path: str, filename: str) -> dict:
     """Extract PDF text/tables, chunk it, and index text vectors in Qdrant."""
 
     try:
-        docs = detect_and_parse(file_path)
-        chunks = chunk_documents(docs)
+        docs = timed_call("ingest.text_parse", detect_and_parse, file_path)
+        chunks = timed_call("ingest.text_chunk", chunk_documents, docs)
         if not chunks:
             return {
                 "status": "failed",
@@ -353,10 +549,19 @@ def _ingest_text_index(file_path: str, filename: str) -> dict:
                 "reason": "No text could be extracted.",
             }
 
-        model = get_embedding_model()
+        model = timed_call("ingest.load_embedding_model", get_embedding_model)
         chunk_texts = [chunk["text"] for chunk in chunks]
-        embeddings = embed_texts(model, chunk_texts)
-        sparse_embeddings = embed_sparse_texts(chunk_texts)
+        embeddings = timed_call(
+            "ingest.embed_dense_chunks",
+            embed_texts,
+            model,
+            chunk_texts,
+        )
+        sparse_embeddings = timed_call(
+            "ingest.embed_sparse_chunks",
+            embed_sparse_texts,
+            chunk_texts,
+        )
         chunks_with_embeddings = [
             {**chunk, "embedding": embedding, "sparse_embedding": sparse_embedding}
             for chunk, embedding, sparse_embedding in zip(
@@ -366,7 +571,13 @@ def _ingest_text_index(file_path: str, filename: str) -> dict:
             )
         ]
 
-        upsert_chunks(get_qdrant_client(), chunks_with_embeddings)
+        client = timed_call("ingest.load_qdrant_client", get_qdrant_client)
+        timed_call(
+            "ingest.upsert_text_chunks",
+            upsert_chunks,
+            client,
+            chunks_with_embeddings,
+        )
         return {
             "status": "indexed",
             "source": filename,
@@ -397,8 +608,15 @@ def _ingest_visual_index(file_path: str, filename: str) -> dict:
             }
 
         collection_name = get_visual_collection_name()
-        model, processor = get_colpali()
-        index_pdf_pages(model, processor, file_path, collection_name)
+        model, processor = timed_call("ingest.load_colpali", get_colpali)
+        timed_call(
+            "ingest.index_visual_pages",
+            index_pdf_pages,
+            model,
+            processor,
+            file_path,
+            collection_name,
+        )
         return {
             "status": "indexed",
             "source": filename,
@@ -443,12 +661,15 @@ def _try_retrieve_visual_evidence(question, top_k=5) -> list[dict]:
     """Return ColPali page evidence if the visual index is available."""
 
     try:
+        collection_name = get_visual_collection_name()
+        if not visual_index_has_points(collection_name):
+            return []
         model, processor = get_colpali()
         return retrieve_visual(
             model,
             processor,
             question,
-            get_visual_collection_name(),
+            collection_name,
             top_k=top_k,
         )
     except Exception:
@@ -465,6 +686,14 @@ def _should_retrieve_visual(text_result) -> bool:
     if grade_score is None:
         return False
     return grade_score < _auto_text_grade_threshold()
+
+
+def _visual_fallback_enabled() -> bool:
+    """Return whether query-time visual fallback is allowed."""
+
+    if os.getenv("VISUAL_INDEX_MODE", "auto").lower() == "never":
+        return False
+    return os.getenv("ENABLE_VISUAL_FALLBACK", "true").lower() == "true"
 
 
 def _generate_auto_answer(llm, question, text_result, visual_results) -> dict:

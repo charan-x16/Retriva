@@ -6,6 +6,11 @@ import re
 
 from dotenv import load_dotenv
 
+from backend.generation.prompt import (
+    RAGAS_JUDGE_SYSTEM_PROMPT,
+    build_ragas_metric_prompt,
+)
+
 logger = logging.getLogger(__name__)
 
 
@@ -234,69 +239,17 @@ def _fill_missing_scores(scores, question, answer, contexts, reference) -> dict:
 def _score_metric_with_llm(client, model, metric, question, answer, context, reference):
     """Ask the evaluator model for one numeric metric score."""
 
-    prompt = _metric_prompt(metric, question, answer, context, reference)
+    prompt = build_ragas_metric_prompt(metric, question, answer, context, reference)
     response = client.chat.completions.create(
         model=model,
         messages=[
-            {
-                "role": "system",
-                "content": (
-                    "You are a strict RAG evaluation judge. Return only one "
-                    "number between 0.0 and 1.0. Do not explain."
-                ),
-            },
+            {"role": "system", "content": RAGAS_JUDGE_SYSTEM_PROMPT},
             {"role": "user", "content": prompt},
         ],
         temperature=0,
     )
     content = response.choices[0].message.content or ""
     return _to_float_or_none(content)
-
-
-def _metric_prompt(metric, question, answer, context, reference):
-    """Build a focused scoring prompt for one evaluation metric."""
-
-    metric_instructions = {
-        "faithfulness": (
-            "Score whether the answer is fully supported by the context. "
-            "1.0 means every factual claim is grounded in the context. "
-            "0.0 means the answer is mostly unsupported or hallucinated."
-        ),
-        "answer_relevancy": (
-            "Score whether the answer directly addresses the user's question. "
-            "1.0 means the answer is specific and complete for the question. "
-            "0.0 means it is off-topic or evasive."
-        ),
-        "context_precision": (
-            "Score whether the retrieved context is focused and useful for "
-            "answering the question. 1.0 means most context is relevant. "
-            "0.0 means most context is irrelevant."
-        ),
-        "context_recall": (
-            "Score whether the retrieved context contains enough information "
-            "to support the reference answer. 1.0 means enough information is "
-            "present. 0.0 means critical information is missing."
-        ),
-    }
-    instruction = metric_instructions.get(metric, "Score this RAG output.")
-    return f"""
-Metric: {metric}
-Instruction: {instruction}
-
-Question:
-{question}
-
-Answer:
-{answer}
-
-Reference:
-{reference}
-
-Retrieved context:
-{context}
-
-Return only one number between 0.0 and 1.0.
-""".strip()
 
 
 def _normalize_scores(result, default_scores) -> dict:

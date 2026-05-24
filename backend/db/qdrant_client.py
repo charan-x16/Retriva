@@ -144,6 +144,55 @@ def search_sparse(client, query_sparse_vector, top_k=20) -> list[dict]:
     return _points_to_chunks(response.points, "bm25_score")
 
 
+def list_indexed_documents(client) -> list[dict]:
+    """Return unique document names and text chunk counts from Qdrant."""
+
+    documents = {}
+    try:
+        offset = None
+        while True:
+            points, offset = client.scroll(
+                collection_name=get_collection_name(),
+                limit=256,
+                offset=offset,
+                with_payload=True,
+                with_vectors=False,
+            )
+            for point in points:
+                payload = dict(point.payload or {})
+                source = payload.get("source")
+                if not source:
+                    continue
+
+                item = documents.setdefault(
+                    source,
+                    {
+                        "source": source,
+                        "text_chunks": 0,
+                        "text_pages": set(),
+                    },
+                )
+                item["text_chunks"] += 1
+                if payload.get("page"):
+                    item["text_pages"].add(payload["page"])
+
+            if offset is None:
+                break
+    except Exception:
+        return []
+
+    results = []
+    for item in documents.values():
+        results.append(
+            {
+                "source": item["source"],
+                "text_chunks": item["text_chunks"],
+                "text_pages": len(item["text_pages"]),
+            }
+        )
+    return sorted(results, key=lambda item: item["source"].lower())
+
+
 def _collection_exists(client, collection_name) -> bool:
     """Check collection existence across qdrant-client versions."""
 
