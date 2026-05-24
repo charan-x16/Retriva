@@ -1,4 +1,4 @@
-# Python dependencies for Retriva Stage 1.
+# Python dependencies for Retriva.
 
 fastapi
 uvicorn

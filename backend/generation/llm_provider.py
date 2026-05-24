@@ -51,7 +51,7 @@ class OpenRouterProvider(LLMProvider):
 
         self.model = os.getenv(
             "OPENROUTER_MODEL",
-            "nvidia/nemotron-3-super-120b-a12b:free",
+            "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free",
         )
         self.client = OpenAI(
             api_key=api_key,

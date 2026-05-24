@@ -21,7 +21,6 @@ def init_qdrant() -> QdrantClient:
     qdrant_url = (
         os.getenv("QDRANT_URL")
         or os.getenv("QDRANT_ENDPOINT")
-        or os.getenv("QDARANT_ENDPOINT")
         or "http://localhost:6333"
     )
     qdrant_api_key = os.getenv("QDRANT_API_KEY") or None
@@ -83,7 +82,7 @@ def get_collection_name() -> str:
     """Return the configured Qdrant collection name."""
 
     load_dotenv()
-    return os.getenv("QDRANT_COLLECTION_NAME", "retriva_chunks")
+    return os.getenv("QDRANT_COLLECTION_NAME", "Retriva")
 
 
 def upsert_chunks(client, chunks_with_embeddings):

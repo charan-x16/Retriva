@@ -10,9 +10,9 @@ def load_reranker() -> FlagReranker:
     """Load the configured BGE reranker model."""
 
     load_dotenv()
-    model_name = os.getenv("RERANKER_MODEL", "BAAI/bge-reranker-v2-m3")
+    model_name = os.getenv("RERANKER_MODEL", "BAAI/bge-reranker-base")
     cache_dir = os.getenv("MODEL_CACHE_DIR", ".cache/models")
-    use_fp16 = os.getenv("RERANKER_USE_FP16", "true").lower() == "true"
+    use_fp16 = os.getenv("RERANKER_USE_FP16", "false").lower() == "true"
     return FlagReranker(model_name, use_fp16=use_fp16, cache_dir=cache_dir)
 
 

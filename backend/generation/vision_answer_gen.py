@@ -69,7 +69,7 @@ def _visual_model_name() -> str:
     return (
         os.getenv("VISUAL_OPENROUTER_MODEL")
         or os.getenv("OPENROUTER_MODEL")
-        or "google/gemma-4-31b-it:free"
+        or "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free"
     )
 
 

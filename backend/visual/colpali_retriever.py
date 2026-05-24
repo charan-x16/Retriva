@@ -242,7 +242,6 @@ def _visual_qdrant_client() -> QdrantClient:
     qdrant_url = (
         os.getenv("QDRANT_URL")
         or os.getenv("QDRANT_ENDPOINT")
-        or os.getenv("QDARANT_ENDPOINT")
         or "http://localhost:6333"
     )
     client = QdrantClient(
