@@ -36,6 +36,23 @@ Core technologies: `Python`, `FastAPI`, `Streamlit`, `Qdrant`, `PyMuPDF`,
 - Evaluation dashboard with Ragas-style faithfulness, relevancy, precision, and recall.
 - FastAPI backend, Streamlit frontend, Qdrant vector database, and SQLite evaluation logs.
 
+## Current Evaluation Snapshot
+
+On the current logged document-QA evaluation set, Retriva achieved a **96.27%**
+average RAG quality score across faithfulness, answer relevancy, context
+precision, and context recall.
+
+| Metric | Score |
+| --- | ---: |
+| Faithfulness | 98.57% |
+| Answer relevancy | 94.79% |
+| Context precision | 91.71% |
+| Context recall | 100.00% |
+| Average RAG quality | **96.27%** |
+
+Note: this score is based on the current local evaluation logs, not a universal
+benchmark. It should be updated as the evaluation set grows.
+
 ## What Makes It Different
 
 Most PDF chat apps are built around clean text extraction. Retriva is designed
