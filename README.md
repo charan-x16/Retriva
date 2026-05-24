@@ -11,6 +11,20 @@ and evaluation into one simple chat experience.
 Upload documents -> Retriva indexes evidence -> Ask questions -> Get cited answers
 ```
 
+## Built With
+
+![Python](https://img.shields.io/badge/Python-3.11-blue)
+![FastAPI](https://img.shields.io/badge/FastAPI-Backend-009688)
+![Streamlit](https://img.shields.io/badge/Streamlit-Frontend-ff4b4b)
+![Qdrant](https://img.shields.io/badge/Qdrant-Vector_DB-dc244c)
+![BGE](https://img.shields.io/badge/BGE-Embeddings_&_Reranking-4b6fff)
+![ColPali](https://img.shields.io/badge/ColPali-Visual_Retrieval-7c3aed)
+![RAG](https://img.shields.io/badge/RAG-Self_Correcting-111827)
+
+Core technologies: `Python`, `FastAPI`, `Streamlit`, `Qdrant`, `PyMuPDF`,
+`Tesseract OCR`, `Camelot`, `Sentence Transformers`, `FlagEmbedding`, `BGE`,
+`ColPali`, `OpenRouter`, `Ragas`, and `SQLite`.
+
 ## Project Highlights
 
 - Hybrid document retrieval with dense BGE embeddings and Qdrant BM25 sparse vectors.
@@ -183,21 +197,22 @@ evolves.
 
 ## Tech Stack
 
-| Layer | Tools |
+| Layer | Technology |
 | --- | --- |
-| Backend API | FastAPI, Uvicorn |
-| Frontend | Streamlit |
-| Vector database | Qdrant |
-| PDF parsing | PyMuPDF |
-| OCR | Tesseract, Pillow |
-| Tables | Camelot |
-| Dense embeddings | Sentence Transformers, BGE |
+| Backend | FastAPI, Uvicorn, Pydantic |
+| Frontend | Streamlit multipage app |
+| Vector database | Qdrant dense and sparse collections |
+| PDF processing | PyMuPDF, Pillow |
+| OCR | Tesseract |
+| Table extraction | Camelot |
+| Dense retrieval | Sentence Transformers with BGE embeddings |
 | Sparse retrieval | Qdrant FastEmbed BM25 |
+| Rank fusion | Reciprocal rank fusion |
 | Reranking | FlagEmbedding BGE reranker |
-| Visual retrieval | ColPali |
-| LLM providers | OpenRouter and OpenAI-compatible clients |
+| Visual retrieval | ColPali page embeddings |
+| LLM layer | OpenRouter and OpenAI-compatible clients |
 | Evaluation | Ragas-style metrics, SQLite |
-| Environment | python-dotenv, `.env` configuration |
+| Configuration | python-dotenv and `.env` |
 
 ## Project Structure
 
